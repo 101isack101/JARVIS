@@ -1,0 +1,41 @@
+# Secrets
+.env
+.env*
+*.env
+*.env.*
+.env.local
+*.pem
+*.key
+*.p12
+*.pfx
+*.kdbx
+*.cache
+*secret*
+*credentials*
+*token*
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+.pytest_cache/
+
+# Grace runtime data
+data/
+logs/
+*.db
+*.sqlite
+*.sqlite3
+memory_index.faiss
+
+# OS
+Thumbs.db
+.DS_Store
+
+# IDEs
+.vscode/
+.idea/
+*.swp

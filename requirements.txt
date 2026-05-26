@@ -1,0 +1,50 @@
+﻿# JARVIS - Conversational Realtime Agent
+# Install globally to H:\Python311 (Isaac's preference, no venv)
+# & "H:\Python311\python.exe" -m pip install -r requirements.txt
+#
+# Versiones acotadas con rango conservador para evitar breaking changes
+# silenciosos. Para reproducibilidad exacta, generar requirements.lock con:
+#   & "H:\Python311\python.exe" -m pip freeze > requirements.lock
+
+# Core backbones
+google-genai>=0.8.0,<2.0
+anthropic>=0.40.0,<1.0
+python-dotenv>=1.0.1,<2.0
+
+# Audio I/O
+sounddevice>=0.5.1,<1.0
+soundcard>=0.4.3,<1.0
+numpy>=1.26.0,<3.0
+
+# VAD local (modo escucha libre)
+silero-vad>=5.1.0,<6.0
+torch>=2.4.0,<3.0          # CPU only, backend de Silero
+
+# UI
+# tkinter ya viene con Python 3.11 — no instalar
+
+# Hotkeys + automation
+keyboard>=0.13.5,<1.0
+pyautogui>=0.9.54,<1.0
+pywinauto>=0.6.8,<1.0
+pywin32>=306               # SetWindowDisplayAffinity para overlay invisible
+spotipy>=2.24.0,<3.0       # Spotify Web API + OAuth cache para control de musica
+websocket-client>=1.8.0,<2.0  # Chrome DevTools Protocol opcional para leer DOM
+
+# Screen capture
+Pillow>=10.4.0,<12.0       # ImageGrab
+mss>=10.0.0,<11.0          # Multi-monitor rapido
+
+# Memoria + RAG (Obsidian-backed con indexacion incremental)
+faiss-cpu>=1.8.0,<2.0
+sentence-transformers>=3.0.0,<6.0
+watchdog>=4.0.0,<7.0       # File watcher para reindex incremental del vault
+pyyaml>=6.0,<7.0           # Parsear frontmatter YAML de notas Obsidian
+mcp>=1.27.0,<2.0           # MCP server/client local para operar Obsidian
+
+# Observability
+loguru>=0.7.2,<1.0
+
+# Tests
+pytest>=8.0.0,<9.0
+pytest-asyncio>=0.24.0,<2.0
