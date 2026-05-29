@@ -100,8 +100,10 @@ synthesize_and_save(
     # 5. return path
 
 load_last_summary(vault: ObsidianVault, max_chars: int) -> str | None
-    # Busca la nota más reciente en SESSIONS_SUBDIR (por nombre/fecha),
-    # devuelve secciones Resumen + Pendientes recortadas a max_chars.
+    # Busca la nota más reciente en SESSIONS_SUBDIR ordenando por nombre de
+    # archivo descendente (el naming YYYY-MM-DD_HHMM es cronológico ⇒ el
+    # primero es el más nuevo). Devuelve secciones Resumen + Pendientes
+    # recortadas a max_chars.
 ```
 
 **Formato de la nota generada** (`05-CLAUDE/context/sessions/YYYY-MM-DD_HHMM_sesion.md`):
@@ -141,7 +143,11 @@ generated_by: claude-sonnet-4-6
      `CONTEXTO DE SESIÓN ANTERIOR` al `system_prompt` (junto al `preferences_prompt_block`).
 
 2. **Durante** — en `_on_turn_complete()` ([jarvis.py:475](../../../jarvis.py)):
-   - `journal.append_turn(user=último input_transcript, jarvis=último output_transcript)`.
+   - `journal.append_turn(...)` con el **delta del turno actual**. Nota de
+     implementación: `_input_transcript` / `_output_transcript` son listas que
+     acumulan a lo largo de la sesión; hay que capturar/concatenar solo los
+     fragmentos del turno que acaba de completar (p.ej. trackear un índice de
+     "último volcado" o limpiar buffers por turno), no toda la lista acumulada.
 
 3. **Cierre limpio** — en `stop()` ([jarvis.py:248](../../../jarvis.py)):
    - `synthesize_and_save(...)` con guard idempotente (corre una sola vez).
