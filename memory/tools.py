@@ -19,6 +19,7 @@ from __future__ import annotations
 import os
 import re
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
@@ -29,6 +30,7 @@ from security.policy import SECRET_FILENAMES, SECRET_SUFFIXES
 from . import notes as notes_mod
 from .obsidian_vault import ObsidianVault, VaultError
 from .rag import VaultRAG
+from .triage import triage_memory, update_project_memory_card
 
 
 @dataclass
@@ -526,15 +528,42 @@ def jarvis_recall(ctx: ToolContext, query: str, top_k: int = 3) -> dict:
         "query": query,
         "found": len(results),
         "results": [
-            {
-                "title": r.chunk.title,
-                "path": r.chunk.rel_path,
-                "score": round(r.score, 3),
-                "snippet": r.chunk.text[:400],
-            }
+            _recall_result_dict(ctx, r)
             for r in results
         ],
     }
+
+
+def _recall_result_dict(ctx: ToolContext, result) -> dict:
+    chunk = result.chunk
+    out = {
+        "title": chunk.title,
+        "path": chunk.rel_path,
+        "score": round(result.score, 3),
+        "snippet": chunk.text[:400],
+    }
+    out.update(_note_memory_metadata(ctx, chunk.rel_path))
+    return out
+
+
+def _note_memory_metadata(ctx: ToolContext, rel_path: str) -> dict:
+    try:
+        path = (ctx.vault.vault_path / rel_path).resolve()
+        note = notes_mod.read_note(ctx.vault, path)
+    except Exception:
+        return {}
+    keys = (
+        "type",
+        "memory_kind",
+        "importance",
+        "confidence",
+        "last_confirmed",
+        "updated",
+    )
+    meta = {key: note.frontmatter[key] for key in keys if key in note.frontmatter}
+    if note.tags:
+        meta["tags"] = note.tags
+    return meta
 
 
 def jarvis_remember(
@@ -543,19 +572,99 @@ def jarvis_remember(
     content: str,
     tags: list[str] | None = None,
 ) -> dict:
+    triage = triage_memory(title, content, tags)
+    if not triage.should_save:
+        return {
+            "saved": False,
+            "blocked": triage.memory_kind == "sensitive",
+            "memory_kind": triage.memory_kind,
+            "reason": triage.reason,
+            "tags": triage.tags,
+        }
+
     path = ctx.vault.memory_file(title)
-    note = notes_mod.write_note(
-        ctx.vault, path,
-        body=content,
-        tags=tags or [],
-    )
+    frontmatter = {
+        "type": "jarvis-memory",
+        "memory_kind": triage.memory_kind,
+        "source": "jarvis_remember",
+        "confidence": triage.confidence,
+        "importance": triage.importance,
+        "last_confirmed": _now_iso(),
+    }
+    if triage.project:
+        frontmatter["project"] = triage.project
+    operation = "created"
+    if path.exists():
+        existing = notes_mod.read_note(ctx.vault, path)
+        existing_tags = existing.tags
+        merged_tags = sorted(set(existing_tags + triage.tags))
+        existing.frontmatter["type"] = existing.frontmatter.get("type", "jarvis-memory")
+        existing.frontmatter["memory_kind"] = existing.frontmatter.get("memory_kind", triage.memory_kind)
+        existing.frontmatter["source"] = existing.frontmatter.get("source", "jarvis_remember")
+        existing.frontmatter["confidence"] = triage.confidence
+        existing.frontmatter["importance"] = triage.importance
+        existing.frontmatter["last_confirmed"] = _now_iso()
+        if triage.project:
+            existing.frontmatter["project"] = triage.project
+        existing.frontmatter["tags"] = merged_tags
+        section_title = f"Memory update - {triage.memory_kind}"
+        existing.body = (
+            existing.body.rstrip()
+            + f"\n\n## {section_title} ({_now_iso()[:10]})\n\n"
+            + content.strip()
+            + "\n"
+        )
+        note = notes_mod.write_note(ctx.vault, path, existing.body, existing.frontmatter)
+        operation = "appended"
+    else:
+        note = notes_mod.write_note(
+            ctx.vault,
+            path,
+            body=content,
+            frontmatter=frontmatter,
+            tags=triage.tags,
+        )
     rel = path.relative_to(ctx.vault.vault_path)
-    return {
+    index_result = _index_memory_now(ctx, path)
+    project_card = update_project_memory_card(
+        ctx.vault,
+        triage,
+        source_title=note.title,
+        content=content,
+    )
+    if project_card.get("updated") and project_card.get("path"):
+        card_path = (ctx.vault.vault_path / project_card["path"]).resolve()
+        project_card["index"] = _index_memory_now(ctx, card_path)
+    result = {
         "saved": True,
+        "operation": operation,
         "path": str(rel),
         "title": note.title,
         "tags": note.tags,
+        "memory_kind": triage.memory_kind,
+        "importance": triage.importance,
+        "confidence": triage.confidence,
+        "project": triage.project,
+        "project_card": project_card,
     }
+    result.update(index_result)
+    return result
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).astimezone().strftime("%Y-%m-%dT%H:%M:%S%z")
+
+
+def _index_memory_now(ctx: ToolContext, path: Path) -> dict:
+    try:
+        chunks = ctx.rag.index_file(path)
+        ctx.rag.save()
+        return {"indexed": True, "chunks_indexed": chunks}
+    except Exception as exc:
+        return {
+            "indexed": False,
+            "index_error": f"{type(exc).__name__}: {exc}",
+        }
 
 
 def jarvis_browse(ctx: ToolContext, folder: str = "", limit: int = 20) -> dict:
