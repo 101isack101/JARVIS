@@ -541,6 +541,22 @@ class Jarvis:
         # Append nueva linea para separar turnos en transcript
         self._tk(lambda: self.overlay.append_output("\n"))
 
+        # Fase 1 — Continuidad: persistir el DELTA de este turno al journal.
+        if self.session_continuity_enabled:
+            try:
+                user_delta = " ".join(
+                    self._input_transcript[self._journal_input_idx:]
+                ).strip()
+                jarvis_delta = "".join(
+                    self._output_transcript[self._journal_output_idx:]
+                ).strip()
+                self._journal_input_idx = len(self._input_transcript)
+                self._journal_output_idx = len(self._output_transcript)
+                if user_delta or jarvis_delta:
+                    self.session_journal.append_turn(user_delta, jarvis_delta)
+            except Exception as exc:
+                self._log(f"[WARN] journal append falló: {exc}")
+
     def _on_playback_complete(self) -> None:
         """Llamado desde AudioPlayer._callback cuando la cola de audio se vacia.
 
@@ -644,33 +660,30 @@ class Jarvis:
             return None
 
     def _save_session_memory(self) -> None:
-        input_text = " ".join(self._input_transcript).strip()
-        output_text = "".join(self._output_transcript).strip()
-        snap = self.tracker.snapshot()
-        if not input_text and not output_text and snap.total_cost_usd == 0:
+        """Cierre limpio: sintetiza el journal en una nota-diario fechada.
+
+        Idempotente (corre una sola vez por proceso). Si la continuidad está
+        desactivada o no hay reasoner, no hace nada. Si la síntesis falla, el
+        journal queda intacto y se reintenta como huérfano al próximo arranque.
+        """
+        if self._session_saved or not self.session_continuity_enabled:
             return
-        title = f"Jarvis session {datetime.now().strftime('%Y-%m-%d %H%M')} {self.session_id}"
-        body = (
-            f"# {title}\n\n"
-            f"- Session ID: `{self.session_id}`\n"
-            f"- Modo final: `{self.modes.mode}`\n"
-            f"- Costo estimado: `${snap.total_cost_usd:.6f}`\n"
-            f"- Duracion: `{snap.session_duration_s():.0f}s`\n\n"
-            "## Isaac dijo\n\n"
-            f"{input_text[:4000] or '(sin transcript de entrada)'}\n\n"
-            "## Jarvis respondio\n\n"
-            f"{output_text[:4000] or '(sin transcript de salida)'}\n"
-        )
-        path = self.vault.memory_file(title)
-        notes_mod.write_note(
+        self._session_saved = True
+        p = synthesize_and_save(
+            self.session_journal,
+            self.reasoner,
             self.vault,
-            path,
-            body=body,
-            tags=["jarvis-session", "episodic-memory"],
+            min_turns=self.session_min_turns,
+            session_id=self.session_id,
         )
-        self.rag.index_file(path)
-        self.rag.save()
-        self._log(f"memoria episodica guardada: {path.relative_to(self.vault.vault_path)}")
+        if p is None:
+            return
+        try:
+            self.rag.index_file(p)
+            self.rag.save()
+        except Exception as exc:
+            self._log(f"[WARN] no se indexó nota de sesión: {exc}")
+        self._log(f"nota de sesión guardada: {p.relative_to(self.vault.vault_path)}")
 
 
 def main() -> int:
