@@ -44,6 +44,12 @@ from memory.indexer import IncrementalIndexer
 from memory import notes as notes_mod
 from memory.obsidian_vault import ObsidianVault
 from memory.rag import VaultRAG
+from memory.session_journal import SessionJournal
+from memory.session_summary import (
+    synthesize_and_save,
+    load_last_summary,
+    build_recall_block,
+)
 from memory.tools import ToolContext, ToolDispatcher, make_tool_object
 from mcp_obsidian.client import ObsidianMCPClient
 from overlay.hotkeys import HotkeyCallbacks, HotkeyListener
@@ -108,6 +114,21 @@ class Jarvis:
         self._stopping = False
         self._input_transcript: list[str] = []
         self._output_transcript: list[str] = []
+
+        # Fase 1 — Continuidad entre sesiones.
+        self.session_continuity_enabled = (
+            os.environ.get("JARVIS_SESSION_JOURNAL_ENABLED", "true").lower() == "true"
+        )
+        self.session_min_turns = int(os.environ.get("JARVIS_SESSION_MIN_TURNS", "3"))
+        self.session_recall_max_chars = int(
+            os.environ.get("JARVIS_SESSION_RECALL_MAX_CHARS", "1000")
+        )
+        self.session_journal = SessionJournal(ROOT / "data" / "session_journal.jsonl")
+        self._session_saved = False  # guard idempotente para síntesis en stop()
+        # Índice del último volcado a journal por turno (delta, no acumulado).
+        self._journal_input_idx = 0
+        self._journal_output_idx = 0
+
         self._thinking_since_ms: int | None = None
         # Timestamp del ultimo activity_end disparado por VAD en LIBRE.
         # Usado para suprimir activity_start inmediato (anti-rebote de "uhm").
@@ -146,6 +167,36 @@ class Jarvis:
         log.info("Pre-warm sentence-transformers (evita bloqueo en primer recall)...")
         self.rag._embed(["pre-warm"])
         log.info("Modelo pre-cargado.")
+
+        # Fase 1 — Continuidad: reconciliar journal huérfano (síntesis diferida)
+        # y recuperar el resumen de la última sesión para inyectarlo al prompt.
+        recall_block = ""
+        if self.session_continuity_enabled:
+            try:
+                if self.session_journal.has_pending():
+                    log.info("Journal huérfano detectado; sintetizando sesión previa...")
+                    p = synthesize_and_save(
+                        self.session_journal,
+                        self.reasoner,
+                        self.vault,
+                        min_turns=self.session_min_turns,
+                        session_id=self.session_id,
+                    )
+                    if p is not None:
+                        try:
+                            self.rag.index_file(p)
+                            self.rag.save()
+                        except Exception as exc:
+                            log.warning(f"[WARN] no se indexó nota huérfana: {exc}")
+            except Exception as exc:
+                log.warning(f"[WARN] síntesis diferida falló: {exc}")
+            try:
+                prev = load_last_summary(self.vault, self.session_recall_max_chars)
+                recall_block = build_recall_block(prev)
+                if recall_block:
+                    log.info("Contexto de sesión anterior inyectado al system_prompt.")
+            except Exception as exc:
+                log.warning(f"[WARN] recall de sesión previa falló: {exc}")
 
         self.tool_ctx = ToolContext(
             vault=self.vault,
@@ -215,7 +266,12 @@ class Jarvis:
             config=SessionConfig(
                 api_key=api_key,
                 voice=os.environ.get("GEMINI_VOICE", "Aoede"),
-                system_prompt=SYSTEM_PROMPT + "\n\n" + preferences_prompt_block(self.preferences),
+                system_prompt=(
+                    SYSTEM_PROMPT
+                    + "\n\n"
+                    + preferences_prompt_block(self.preferences)
+                    + (("\n\n" + recall_block) if recall_block else "")
+                ),
                 manual_activity_mode=True,
                 enable_input_transcription=True,
                 tools=[make_tool_object()],
