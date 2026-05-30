@@ -148,3 +148,20 @@ def load_last_summary(vault: ObsidianVault, max_chars: int) -> str | None:
     if not sections:
         return None
     return sections[:max_chars]
+
+
+def build_recall_block(summary: str | None) -> str:
+    """Envuelve el resumen recuperado en un bloque para el system_prompt.
+
+    Devuelve "" si no hay nada que inyectar (degradación elegante).
+    """
+    if not summary or not summary.strip():
+        return ""
+    bar = "═" * 11
+    return (
+        f"{bar} CONTEXTO DE SESIÓN ANTERIOR {bar}\n"
+        f"{summary.strip()}\n"
+        f"{bar}{bar}\n"
+        "(Usa esto solo si Isaac retoma algo de la sesión previa; "
+        "no lo recites sin que venga al caso.)"
+    )

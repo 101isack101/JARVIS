@@ -181,3 +181,18 @@ def test_load_last_summary_excludes_proyectos_tocados(temp_vault):
     assert "retomar Y" in out
     assert "secreto" not in out  # la sección Proyectos tocados se excluye
     assert "Proyectos tocados" not in out
+
+
+def test_build_recall_block_wraps_with_header():
+    from memory.session_summary import build_recall_block
+
+    block = build_recall_block("## Resumen\n- algo\n\n## Pendientes\n- retomar X")
+    assert "CONTEXTO DE SESIÓN ANTERIOR" in block
+    assert "retomar X" in block
+
+
+def test_build_recall_block_empty_returns_empty_string():
+    from memory.session_summary import build_recall_block
+
+    assert build_recall_block(None) == ""
+    assert build_recall_block("") == ""
