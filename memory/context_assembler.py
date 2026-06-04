@@ -71,6 +71,10 @@ def _format_rag(results: list) -> tuple[str, int]:
     return "\n".join(lines), len(kept)
 
 
+def _section_cost(header: str, content: str) -> int:
+    return estimate_tokens(f"## {header}\n{content.strip()}\n\n")
+
+
 def build_project_context(
     vault: ObsidianVault,
     rag: VaultRAG,
@@ -82,13 +86,12 @@ def build_project_context(
     if not project:
         return ContextResult()
 
-    sections: list[tuple[str, str]] = []
-    sources: list[str] = []
+    # Candidatos en orden de prioridad: (label, header, content)
+    candidates: list[tuple[str, str, str]] = []
 
     card = _load_card_body(vault, project)
     if card:
-        sections.append(("Memory Card", card))
-        sources.append("card")
+        candidates.append(("card", "Memory Card", card))
 
     from . import session_summary  # import local: evita ciclo en import time
 
@@ -97,8 +100,7 @@ def build_project_context(
     except Exception:
         recall = None
     if recall and recall.strip():
-        sections.append(("Sesión anterior", recall))
-        sources.append("session")
+        candidates.append(("session", "Sesión anterior", recall))
 
     try:
         rag_results = rag.search(prompt, top_k=RAG_TOP_K)
@@ -106,10 +108,27 @@ def build_project_context(
         rag_results = []
     rag_text, rag_count = _format_rag(rag_results)
     if rag_text:
-        sections.append(("Memorias relacionadas", rag_text))
-        sources.append(f"rag:{rag_count}")
+        candidates.append((f"rag:{rag_count}", "Memorias relacionadas", rag_text))
+
+    sections: list[tuple[str, str]] = []
+    sources: list[str] = []
+    used = 0
+    for label, header, content in candidates:
+        cost = _section_cost(header, content)
+        if not sections:
+            # Primera sección siempre entra; si excede, se trunca al presupuesto.
+            if cost > token_budget:
+                content = content[: token_budget * 4]
+            sections.append((header, content))
+            sources.append(label)
+            used += _section_cost(header, content)
+            continue
+        if used + cost > token_budget:
+            continue  # descarta esta sección (RAG cae primero por ir al final)
+        sections.append((header, content))
+        sources.append(label)
+        used += cost
 
     if not sections:
         return ContextResult(text="", project=project, sources=[])
-
     return ContextResult(text=_wrap(project, sections), project=project, sources=sources)

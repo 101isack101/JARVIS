@@ -1,4 +1,4 @@
-from memory.context_assembler import ContextResult, build_project_context, estimate_tokens
+from memory.context_assembler import ContextResult, build_project_context, estimate_tokens, _wrap
 from memory.obsidian_vault import ObsidianVault
 from memory import notes as notes_mod
 from memory import triage as triage_mod
@@ -122,3 +122,31 @@ def test_rag_only_no_card_no_session_still_returns_context(tmp_path):
     assert result.project == "Polymath IDE"
     assert any(s.startswith("rag:") for s in result.sources)
     assert "Algo muy relevante" in result.text
+
+
+def test_budget_drops_rag_before_card(tmp_path):
+    vault = ObsidianVault(tmp_path, read_all=True)
+    # _format_rag recorta cada snippet a ~220 chars, así que el RAG real cuesta
+    # ~65 tokens. Card ~18 tokens. budget=70 deja entrar la card pero excede al
+    # sumar el RAG (18+65=83 > 70), forzando el descarte del RAG.
+    big_chunk = "X" * 4000
+    rag = FakeRAG(results=[_result(0.90, big_chunk)])
+    _write_card(vault, "Polymath IDE", "# Polymath IDE - Memory Card\n\n## Pending\n- conservar esto\n")
+
+    result = build_project_context(vault, rag, "Polymath IDE", token_budget=70)
+
+    assert "conservar esto" in result.text          # la card sobrevive
+    assert "card" in result.sources
+    assert not any(s.startswith("rag:") for s in result.sources)  # RAG se descartó
+    assert estimate_tokens(result.text) <= 70 + estimate_tokens(_wrap("Polymath IDE", []))
+
+
+def test_budget_generous_keeps_everything(tmp_path):
+    vault = ObsidianVault(tmp_path, read_all=True)
+    rag = FakeRAG(results=[_result(0.90, "memoria relevante")])
+    _write_card(vault, "Polymath IDE", "# Polymath IDE - Memory Card\n\n## Pending\n- algo\n")
+
+    result = build_project_context(vault, rag, "Polymath IDE", token_budget=5000)
+
+    assert "card" in result.sources
+    assert any(s.startswith("rag:") for s in result.sources)
