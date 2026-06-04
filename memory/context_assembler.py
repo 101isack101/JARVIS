@@ -58,6 +58,19 @@ def _wrap(project: str, sections: list[tuple[str, str]]) -> str:
     return "\n\n".join(parts)
 
 
+def _format_rag(results: list) -> tuple[str, int]:
+    kept = [r for r in results if getattr(r, "score", 0.0) >= MIN_RAG_SCORE]
+    if not kept:
+        return "", 0
+    lines = []
+    for r in kept:
+        snippet = " ".join((r.chunk.text or "").split())
+        if len(snippet) > 220:
+            snippet = snippet[:217].rstrip() + "..."
+        lines.append(f"- [score {r.score:.2f}] {snippet}")
+    return "\n".join(lines), len(kept)
+
+
 def build_project_context(
     vault: ObsidianVault,
     rag: VaultRAG,
@@ -86,6 +99,15 @@ def build_project_context(
     if recall and recall.strip():
         sections.append(("Sesión anterior", recall))
         sources.append("session")
+
+    try:
+        rag_results = rag.search(prompt, top_k=RAG_TOP_K)
+    except Exception:
+        rag_results = []
+    rag_text, rag_count = _format_rag(rag_results)
+    if rag_text:
+        sections.append(("Memorias relacionadas", rag_text))
+        sources.append(f"rag:{rag_count}")
 
     if not sections:
         return ContextResult(text="", project=project, sources=[])

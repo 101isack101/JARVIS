@@ -83,3 +83,42 @@ def test_includes_session_recall_when_present(tmp_path):
     assert "session" in result.sources
     assert "Monaco" in result.text or "conectar el agente" in result.text
     assert "Sesión anterior" in result.text
+
+
+from types import SimpleNamespace
+
+
+def _result(score, text, title="Nota", rel_path="Jarvis Memory/Nota.md"):
+    return SimpleNamespace(
+        score=score,
+        chunk=SimpleNamespace(title=title, rel_path=rel_path, text=text),
+    )
+
+
+def test_includes_rag_chunks_above_threshold(tmp_path):
+    vault = ObsidianVault(tmp_path, read_all=True)
+    rag = FakeRAG(results=[
+        _result(0.80, "Decidimos usar DynamoDB para estado."),
+        _result(0.60, "Optimistic locking con version field."),
+        _result(0.10, "Ruido irrelevante por debajo del umbral."),
+    ])
+    _write_card(vault, "Polymath IDE", "# Polymath IDE - Memory Card\n\n## Pending\n- algo\n")
+
+    result = build_project_context(vault, rag, "Polymath IDE estado y locking")
+
+    assert any(s.startswith("rag:") for s in result.sources)
+    assert "DynamoDB" in result.text
+    assert "Optimistic locking" in result.text
+    assert "Ruido irrelevante" not in result.text  # filtrado por MIN_RAG_SCORE
+    assert rag.queries == [("Polymath IDE estado y locking", 3)]
+
+
+def test_rag_only_no_card_no_session_still_returns_context(tmp_path):
+    vault = ObsidianVault(tmp_path, read_all=True)
+    rag = FakeRAG(results=[_result(0.90, "Algo muy relevante sobre Polymath.")])
+
+    result = build_project_context(vault, rag, "Polymath IDE dudas")
+
+    assert result.project == "Polymath IDE"
+    assert any(s.startswith("rag:") for s in result.sources)
+    assert "Algo muy relevante" in result.text
