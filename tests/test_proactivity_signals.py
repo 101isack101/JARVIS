@@ -43,3 +43,28 @@ def test_no_pendings_no_stale_pending_signal():
     empty = _state(open_pendings=[])
     signals = detect_startup_signals([empty], cfg)
     assert all(s.kind != "stale_pending" for s in signals)
+
+
+def test_stale_project_fires_for_important_untouched_project():
+    cfg = ProactivityConfig(stale_project_days=14)
+    st = _state(staleness_days=20, importance="high", open_pendings=[])
+    signals = detect_startup_signals([st], cfg)
+    assert any(s.kind == "stale_project" for s in signals)
+
+
+def test_stale_project_ignores_low_importance():
+    cfg = ProactivityConfig(stale_project_days=14)
+    st = _state(staleness_days=20, importance="low", open_pendings=[])
+    signals = detect_startup_signals([st], cfg)
+    assert all(s.kind != "stale_project" for s in signals)
+
+
+def test_open_loop_fires_when_decisions_without_recent_progress():
+    cfg = ProactivityConfig(stale_project_days=14)
+    st = _state(
+        staleness_days=20,
+        open_pendings=[],
+        open_decisions=["2026-05-02 [high/high] usar WebSocket para el agente"],
+    )
+    signals = detect_startup_signals([st], cfg)
+    assert any(s.kind == "open_loop" for s in signals)

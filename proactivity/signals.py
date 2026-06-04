@@ -42,10 +42,52 @@ def _stale_pending(states: list[ProjectState], cfg: ProactivityConfig) -> list[S
     return out
 
 
+def _stale_project(states: list[ProjectState], cfg: ProactivityConfig) -> list[Signal]:
+    out: list[Signal] = []
+    for st in states:
+        if st.staleness_days is None or st.staleness_days < cfg.stale_project_days:
+            continue
+        if _IMPORTANCE_RANK.get(st.importance, 1) < _IMPORTANCE_RANK["normal"]:
+            continue
+        out.append(
+            Signal(
+                kind="stale_project",
+                project=st.project,
+                payload={"days": st.staleness_days, "importance": st.importance},
+                base_priority=0.45,
+                evidence=[f"card:{st.project}"],
+            )
+        )
+    return out
+
+
+def _open_loop(states: list[ProjectState], cfg: ProactivityConfig) -> list[Signal]:
+    out: list[Signal] = []
+    for st in states:
+        # decisión registrada pero el proyecto lleva tiempo sin tocarse:
+        # bucle abierto (algo se decidió y no avanzó).
+        if not st.open_decisions:
+            continue
+        if st.staleness_days is None or st.staleness_days < cfg.stale_project_days:
+            continue
+        out.append(
+            Signal(
+                kind="open_loop",
+                project=st.project,
+                payload={"decision": st.open_decisions[0], "days": st.staleness_days},
+                base_priority=0.5,
+                evidence=[f"card:{st.project}"],
+            )
+        )
+    return out
+
+
 def detect_startup_signals(
     states: list[ProjectState], cfg: ProactivityConfig
 ) -> list[Signal]:
     """Señales que no necesitan contexto conversacional (briefing de arranque)."""
     signals: list[Signal] = []
     signals.extend(_stale_pending(states, cfg))
+    signals.extend(_stale_project(states, cfg))
+    signals.extend(_open_loop(states, cfg))
     return signals
