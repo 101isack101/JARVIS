@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from . import notes as notes_mod
 from . import triage as triage_mod
 from .obsidian_vault import ObsidianVault
 from .rag import VaultRAG
@@ -34,6 +35,29 @@ def estimate_tokens(text: str) -> int:
     return len(text) // 4
 
 
+def _load_card_body(vault: ObsidianVault, project: str) -> str:
+    try:
+        path = triage_mod.project_card_path(vault, project)
+    except Exception:
+        return ""
+    if not path.exists():
+        return ""
+    try:
+        note = notes_mod.read_note(vault, path)
+    except Exception:
+        return ""
+    return (note.body or "").strip()
+
+
+def _wrap(project: str, sections: list[tuple[str, str]]) -> str:
+    parts = [f"{BAR} CONTEXTO DE PROYECTO: {project} {BAR}"]
+    for header, content in sections:
+        parts.append(f"## {header}\n{content.strip()}")
+    parts.append(f"{BAR}{BAR}")
+    parts.append("(Contexto recuperado automáticamente por JARVIS. Úsalo solo si viene al caso.)")
+    return "\n\n".join(parts)
+
+
 def build_project_context(
     vault: ObsidianVault,
     rag: VaultRAG,
@@ -44,4 +68,16 @@ def build_project_context(
     project = triage_mod.detect_project(prompt or "")
     if not project:
         return ContextResult()
-    return ContextResult(text="", project=project, sources=[])
+
+    sections: list[tuple[str, str]] = []
+    sources: list[str] = []
+
+    card = _load_card_body(vault, project)
+    if card:
+        sections.append(("Memory Card", card))
+        sources.append("card")
+
+    if not sections:
+        return ContextResult(text="", project=project, sources=[])
+
+    return ContextResult(text=_wrap(project, sections), project=project, sources=sources)
