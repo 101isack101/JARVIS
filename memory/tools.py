@@ -1,8 +1,9 @@
 """
-memory/tools.py - 4 tools de memoria expuestas a Gemini Live como functions.
+memory/tools.py - Tools de memoria expuestas a Gemini Live como functions.
 
 Jarvis decide AUTONOMAMENTE cuando llamarlas:
   - jarvis_recall(query, top_k)             -> antes de responder, si necesita contexto
+  - jarvis_session_recall(query, when)      -> continuidad temporal entre sesiones
   - jarvis_remember(title, content, tags)   -> despues de un turno con info durable
   - jarvis_browse(folder, limit)            -> cuando le piden 'que hay sobre X'
   - jarvis_link(note_from, note_to)         -> cuando descubre relacion entre notas
@@ -28,8 +29,10 @@ from google.genai import types
 from security.policy import SECRET_FILENAMES, SECRET_SUFFIXES
 
 from . import notes as notes_mod
+from .context_assembler import build_project_context
 from .obsidian_vault import ObsidianVault, VaultError
 from .rag import VaultRAG
+from .session_summary import search_session_summaries
 from .triage import triage_memory, update_project_memory_card
 
 
@@ -52,7 +55,11 @@ class ToolContext:
     actions: Any | None = None
     modes: Any | None = None
     obsidian_mcp: Any | None = None
+    obs_memory: Any | None = None
     approvals: Any | None = None
+    # Callback inyectado por Jarvis para cambiar el modo de ESCUCHA (PTT/LIBRE)
+    # por voz. Firma: (target: str) -> dict. None si no esta disponible.
+    set_listen_mode: Callable[..., dict] | None = None
 
 
 # =====================================================================
@@ -82,6 +89,34 @@ JARVIS_RECALL_DECL = types.FunctionDeclaration(
             ),
         },
         required=["query"],
+    ),
+)
+
+JARVIS_SESSION_RECALL_DECL = types.FunctionDeclaration(
+    name="jarvis_session_recall",
+    description=(
+        "Recupera memorias de sesiones recientes ya sintetizadas. USALA cuando "
+        "Isaac diga 'ayer', 'anoche', 'la sesion pasada', 'la vez anterior', "
+        "'la conversacion que tuvimos', 'que hablamos' o cualquier referencia "
+        "temporal a conversaciones previas. Es mas directa que jarvis_recall "
+        "para continuidad entre sesiones y no llama a Claude."
+    ),
+    parameters=types.Schema(
+        type=types.Type.OBJECT,
+        properties={
+            "query": types.Schema(
+                type=types.Type.STRING,
+                description="Tema o frase a buscar dentro de los resumenes de sesiones.",
+            ),
+            "when": types.Schema(
+                type=types.Type.STRING,
+                description="Referencia temporal: ayer, anoche, hoy, anteayer, YYYY-MM-DD o DD/MM/YYYY.",
+            ),
+            "limit": types.Schema(
+                type=types.Type.INTEGER,
+                description="Cantidad maxima de sesiones a devolver. Default 5, max 10.",
+            ),
+        },
     ),
 )
 
@@ -181,7 +216,7 @@ ASK_CLAUDE_DEEP_DECL = types.FunctionDeclaration(
             ),
             "max_tokens": types.Schema(
                 type=types.Type.INTEGER,
-                description="Max tokens de respuesta. Default 1024, max 2048.",
+                description="Max tokens de respuesta. Default 450 (corto, para voz); subilo solo si Isaac pide algo extenso. Max 2048.",
             ),
         },
         required=["prompt"],
@@ -302,6 +337,48 @@ STUDY_MODE_DECL = types.FunctionDeclaration(
     ),
 )
 
+OBS_MEMORY_DECL = types.FunctionDeclaration(
+    name="obs_memory",
+    description=(
+        "Controla OBS Studio por WebSocket y convierte grabaciones en memoria "
+        "episodica para Obsidian. Usala cuando Isaac diga 'empieza a grabar con OBS', "
+        "'documenta esta sesion', 'termina la captura', 'procesa la ultima grabacion "
+        "de OBS' o quiera guardar una sesion de programacion, investigacion, reunion, "
+        "edicion de video, curso o troubleshooting. start inicia grabacion; stop "
+        "detiene y puede procesar; process_latest procesa el ultimo video; "
+        "process_file procesa un archivo concreto; status revisa configuracion/OBS. "
+        "El backend puede borrar el video tras una nota exitosa segun retencion."
+    ),
+    parameters=types.Schema(
+        type=types.Type.OBJECT,
+        properties={
+            "action": types.Schema(
+                type=types.Type.STRING,
+                description=(
+                    "Accion: start, stop, status, process_latest, process_file. "
+                    "Aliases: begin/record, finish/end, latest."
+                ),
+            ),
+            "title": types.Schema(
+                type=types.Type.STRING,
+                description=(
+                    "Titulo humano de la sesion. Ej: Debug Upwork Agent, Reunion cliente, "
+                    "Investigacion OBS Jarvis."
+                ),
+            ),
+            "path": types.Schema(
+                type=types.Type.STRING,
+                description="Path absoluto del video para process_file.",
+            ),
+            "process": types.Schema(
+                type=types.Type.BOOLEAN,
+                description="En stop, si true procesa la grabacion al detener. Default true.",
+            ),
+        },
+        required=["action"],
+    ),
+)
+
 JARVIS_RUN_SAFE_COMMAND_DECL = types.FunctionDeclaration(
     name="jarvis_run_safe_command",
     description=(
@@ -364,7 +441,10 @@ JARVIS_OPEN_URL_DECL = types.FunctionDeclaration(
 
 JARVIS_SET_MODE_DECL = types.FunctionDeclaration(
     name="jarvis_set_mode",
-    description="Cambia el modo de trabajo de Jarvis: general, coding, debugging, meeting o planning.",
+    description=(
+        "Cambia el modo de trabajo de Jarvis: general, coding, debugging, "
+        "meeting, planning, study o english."
+    ),
     parameters=types.Schema(
         type=types.Type.OBJECT,
         properties={
@@ -378,6 +458,42 @@ JARVIS_GET_MODE_DECL = types.FunctionDeclaration(
     name="jarvis_get_mode",
     description="Consulta el modo de trabajo actual de Jarvis.",
     parameters=types.Schema(type=types.Type.OBJECT, properties={}),
+)
+
+ENGLISH_PRACTICE_DECL = types.FunctionDeclaration(
+    name="english_practice",
+    description=(
+        "Activa, desactiva o consulta English Practice Mode. Usala cuando Isaac "
+        "pida practicar ingles, hablar en ingles, corregir su ingles, preparar "
+        "entrevistas/roleplays en ingles, shadowing o desactivar la practica. "
+        "Cuando esta activo, Jarvis conversa principalmente en ingles y da "
+        "correcciones breves despues de cada intervencion de Isaac."
+    ),
+    parameters=types.Schema(
+        type=types.Type.OBJECT,
+        properties={
+            "action": types.Schema(
+                type=types.Type.STRING,
+                description="Accion: start, stop, status, roleplay, shadowing.",
+            ),
+            "level": types.Schema(
+                type=types.Type.STRING,
+                description="Nivel estimado: A1, A2, B1, B2, C1 o auto. Default auto.",
+            ),
+            "focus": types.Schema(
+                type=types.Type.STRING,
+                description=(
+                    "Enfoque de practica: conversation, pronunciation, interview, "
+                    "dev, upwork, travel, grammar, roleplay o shadowing."
+                ),
+            ),
+            "correction_style": types.Schema(
+                type=types.Type.STRING,
+                description="Estilo de correccion: light, standard o strict. Default standard.",
+            ),
+        },
+        required=["action"],
+    ),
 )
 
 JARVIS_SECURITY_STATUS_DECL = types.FunctionDeclaration(
@@ -491,9 +607,35 @@ OBSIDIAN_MCP_DECL = types.FunctionDeclaration(
 )
 
 
+JARVIS_LISTEN_MODE_DECL = types.FunctionDeclaration(
+    name="jarvis_listen_mode",
+    description=(
+        "Cambia el MODO DE ESCUCHA de Jarvis. Usala cuando Isaac pida activar o "
+        "desactivar la escucha libre / manos libres por voz, para no tener que usar "
+        "la tecla Ctrl+Shift+M. Frases tipicas: 'activá escucha libre', 'modo manos "
+        "libres', 'escuchame en libre', 'dejá el microfono abierto' -> mode='libre'. "
+        "'salí de escucha libre', 'volvé a push to talk', 'dejá de escucharme', "
+        "'apagá el microfono', 'modo manual' -> mode='ptt'. Es idempotente: si ya "
+        "esta en ese modo, lo confirma sin error. NO la uses para los modos de "
+        "trabajo (coding/study/etc): para eso esta jarvis_set_mode."
+    ),
+    parameters=types.Schema(
+        type=types.Type.OBJECT,
+        properties={
+            "mode": types.Schema(
+                type=types.Type.STRING,
+                description="'libre' (manos libres, VAD) o 'ptt' (push-to-talk con Ctrl).",
+            ),
+        },
+        required=["mode"],
+    ),
+)
+
+
 def all_function_declarations() -> list[types.FunctionDeclaration]:
     return [
         JARVIS_RECALL_DECL,
+        JARVIS_SESSION_RECALL_DECL,
         JARVIS_REMEMBER_DECL,
         JARVIS_BROWSE_DECL,
         JARVIS_LINK_DECL,
@@ -501,11 +643,14 @@ def all_function_declarations() -> list[types.FunctionDeclaration]:
         SCREEN_LOOK_DECL,
         CHROME_READ_PAGE_DECL,
         STUDY_MODE_DECL,
+        OBS_MEMORY_DECL,
         JARVIS_RUN_SAFE_COMMAND_DECL,
         JARVIS_OPEN_POWERSHELL_DECL,
         JARVIS_OPEN_URL_DECL,
         JARVIS_SET_MODE_DECL,
         JARVIS_GET_MODE_DECL,
+        JARVIS_LISTEN_MODE_DECL,
+        ENGLISH_PRACTICE_DECL,
         JARVIS_SECURITY_STATUS_DECL,
         SPOTIFY_CONTROL_DECL,
         OBSIDIAN_MCP_DECL,
@@ -532,6 +677,21 @@ def jarvis_recall(ctx: ToolContext, query: str, top_k: int = 3) -> dict:
             for r in results
         ],
     }
+
+
+def jarvis_session_recall(
+    ctx: ToolContext,
+    query: str = "",
+    when: str = "",
+    limit: int = 5,
+) -> dict:
+    """Cheap temporal recall over synthesized session notes."""
+    return search_session_summaries(
+        ctx.vault,
+        query=query or "",
+        when=when or "",
+        limit=limit,
+    )
 
 
 def _recall_result_dict(ctx: ToolContext, result) -> dict:
@@ -726,17 +886,31 @@ def _claude_preflight(ctx: ToolContext) -> dict | None:
     return None
 
 
+def _merge_context(model_ctx: str | None, auto_ctx: str) -> str | None:
+    parts = [p for p in (model_ctx, auto_ctx) if p and p.strip()]
+    return "\n\n".join(parts) if parts else None
+
+
+def _augmented_context(ctx: ToolContext, prompt: str, context_extra: str | None) -> str | None:
+    try:
+        auto = build_project_context(ctx.vault, ctx.rag, prompt)
+    except Exception:
+        return context_extra  # fail-safe: nunca rompe el razonamiento
+    return _merge_context(context_extra, auto.text)
+
+
 def ask_claude_deep(
     ctx: ToolContext,
     prompt: str,
     context_extra: str | None = None,
-    max_tokens: int = 1024,
+    max_tokens: int = 450,
 ) -> dict:
     err = _claude_preflight(ctx)
     if err is not None:
         return err
-    max_tokens = max(128, min(int(max_tokens or 1024), 2048))
-    r = ctx.reasoner.ask(prompt, context_extra=context_extra, max_tokens=max_tokens)
+    max_tokens = max(128, min(int(max_tokens or 450), 2048))
+    merged = _augmented_context(ctx, prompt, context_extra)
+    r = ctx.reasoner.ask(prompt, context_extra=merged, max_tokens=max_tokens)
     return _format_claude_response(ctx.reasoner.model, r)
 
 
@@ -744,15 +918,16 @@ async def ask_claude_deep_async(
     ctx: ToolContext,
     prompt: str,
     context_extra: str | None = None,
-    max_tokens: int = 1024,
+    max_tokens: int = 450,
 ) -> dict:
     """Version async usada por el dispatcher para que asyncio.wait_for cancele
     la request HTTP de verdad cuando expira el timeout."""
     err = _claude_preflight(ctx)
     if err is not None:
         return err
-    max_tokens = max(128, min(int(max_tokens or 1024), 2048))
-    r = await ctx.reasoner.ask_async(prompt, context_extra=context_extra, max_tokens=max_tokens)
+    max_tokens = max(128, min(int(max_tokens or 450), 2048))
+    merged = _augmented_context(ctx, prompt, context_extra)
+    r = await ctx.reasoner.ask_async(prompt, context_extra=merged, max_tokens=max_tokens)
     return _format_claude_response(ctx.reasoner.model, r)
 
 
@@ -820,6 +995,7 @@ def chrome_read_page(
 
 
 _STUDY_CONTROLLER = None
+_OBS_MEMORY_CONTROLLER = None
 
 
 def _get_study_controller(ctx: ToolContext):
@@ -832,6 +1008,20 @@ def _get_study_controller(ctx: ToolContext):
             reasoner=ctx.reasoner,
         )
     return _STUDY_CONTROLLER
+
+
+def _get_obs_memory_controller(ctx: ToolContext):
+    global _OBS_MEMORY_CONTROLLER
+    if ctx.obs_memory is not None:
+        return ctx.obs_memory
+    if _OBS_MEMORY_CONTROLLER is None:
+        from obs_memory import OBSMemoryController
+
+        _OBS_MEMORY_CONTROLLER = OBSMemoryController(
+            vault=ctx.vault,
+            reasoner=ctx.reasoner,
+        )
+    return _OBS_MEMORY_CONTROLLER
 
 
 def study_mode(
@@ -944,6 +1134,103 @@ def _require_study_approval(
     return None
 
 
+def obs_memory(
+    ctx: ToolContext,
+    action: str,
+    title: str | None = None,
+    path: str | None = None,
+    process: bool | None = None,
+) -> dict:
+    """Controla OBS y procesa grabaciones como memoria episodica."""
+    controller = _get_obs_memory_controller(ctx)
+    op = (action or "").strip().lower()
+    aliases = {
+        "begin": "start",
+        "record": "start",
+        "start_recording": "start",
+        "finish": "stop",
+        "end": "stop",
+        "stop_recording": "stop",
+        "latest": "process_latest",
+        "process": "process_latest",
+    }
+    op = aliases.get(op, op)
+    if op == "status":
+        return controller.status()
+    if op == "start":
+        approval = _require_obs_approval(
+            ctx,
+            "write",
+            "Jarvis quiere iniciar una grabacion OBS para memoria episodica",
+            {"title": title or "OBS Session"},
+        )
+        if approval is not None:
+            return approval
+        return controller.start(title=title)
+    if op == "stop":
+        approval = _require_obs_approval(
+            ctx,
+            "destructive",
+            "Jarvis quiere detener OBS, guardar memoria y borrar video si el proceso termina bien",
+            {"title": title or "(sesion actual)", "process": True if process is None else bool(process)},
+        )
+        if approval is not None:
+            return approval
+        return controller.stop(title=title, process=True if process is None else bool(process))
+    if op == "process_latest":
+        approval = _require_obs_approval(
+            ctx,
+            "destructive",
+            "Jarvis quiere procesar la ultima grabacion OBS y borrar el video tras exito",
+            {"title": title or "(archivo)", "source": "latest"},
+        )
+        if approval is not None:
+            return approval
+        return controller.process_latest(title=title, background=True)
+    if op == "process_file":
+        if not path:
+            return {"ok": False, "error": "process_file requiere path"}
+        approval = _require_obs_approval(
+            ctx,
+            "destructive",
+            "Jarvis quiere procesar una grabacion OBS y borrar el video tras exito",
+            {"title": title or "(archivo)", "path": path},
+        )
+        if approval is not None:
+            return approval
+        return {
+            "ok": True,
+            "processing": "background",
+            "job": controller.enqueue_process(path, title=title),
+        }
+    return {
+        "ok": False,
+        "error": f"accion OBS Memory invalida: {action}",
+        "valid_actions": ["start", "stop", "status", "process_latest", "process_file"],
+    }
+
+
+def _require_obs_approval(
+    ctx: ToolContext,
+    risk: str,
+    title: str,
+    details: dict,
+) -> dict | None:
+    if ctx.approvals is None:
+        return {
+            "ok": False,
+            "error": "OBS Memory requiere aprobacion HITL para grabar/escribir/borrar video",
+        }
+    approved = ctx.approvals.request(
+        risk=risk,
+        title=title,
+        details=f"OBS Memory\nDetalles: {details}",
+    )
+    if not approved:
+        return {"ok": False, "error": "OBS Memory rechazado por Isaac o timeout HITL"}
+    return None
+
+
 def jarvis_run_safe_command(ctx: ToolContext, command: str, cwd: str | None = None) -> dict:
     if ctx.actions is None:
         return {"executed": False, "error": "SafeActionExecutor no configurado"}
@@ -968,10 +1255,98 @@ def jarvis_set_mode(ctx: ToolContext, mode: str) -> dict:
     return ctx.modes.set_mode(mode)
 
 
+# Alias de lenguaje natural -> modo de escucha canonico (PTT/LIBRE).
+_LISTEN_MODE_ALIASES = {
+    "libre": "LIBRE", "escucha libre": "LIBRE", "manos libres": "LIBRE",
+    "manoslibres": "LIBRE", "free": "LIBRE", "abierto": "LIBRE", "on": "LIBRE",
+    "ptt": "PTT", "push to talk": "PTT", "push-to-talk": "PTT", "pushtotalk": "PTT",
+    "manual": "PTT", "cerrado": "PTT", "off": "PTT",
+}
+
+
+def jarvis_listen_mode(ctx: ToolContext, mode: str) -> dict:
+    """Cambia el modo de ESCUCHA (PTT <-> LIBRE) por voz.
+
+    Delega en el callback `set_listen_mode` que Jarvis inyecta en el ToolContext;
+    ese callback aplica el mismo flujo que la hotkey Ctrl+Shift+M (VAD, capture,
+    overlay) de forma idempotente.
+    """
+    if ctx.set_listen_mode is None:
+        return {"ok": False, "error": "control de modo de escucha no disponible"}
+    target = _LISTEN_MODE_ALIASES.get((mode or "").strip().lower())
+    if target is None:
+        return {
+            "ok": False,
+            "error": f"modo de escucha desconocido: {mode}",
+            "validos": ["libre", "ptt"],
+        }
+    return ctx.set_listen_mode(target)
+
+
 def jarvis_get_mode(ctx: ToolContext) -> dict:
     if ctx.modes is None:
         return {"error": "ModeManager no configurado"}
     return ctx.modes.get_mode()
+
+
+def english_practice(
+    ctx: ToolContext,
+    action: str,
+    level: str | None = None,
+    focus: str | None = None,
+    correction_style: str | None = None,
+) -> dict:
+    """Activa o desactiva el modo de practica de ingles.
+
+    No guarda estado propio persistente; reutiliza ModeManager para que el modo
+    sea visible a las tools existentes y al contexto conversacional de Gemini.
+    """
+    if ctx.modes is None:
+        return {"ok": False, "error": "ModeManager no configurado"}
+
+    op = (action or "").strip().lower()
+    normalized_level = (level or "auto").strip().upper()
+    normalized_focus = (focus or "conversation").strip().lower()
+    normalized_correction = (correction_style or "standard").strip().lower()
+    if normalized_correction not in {"light", "standard", "strict"}:
+        normalized_correction = "standard"
+
+    if op in {"start", "on", "enable", "activate", "roleplay", "shadowing"}:
+        result = ctx.modes.set_mode("english")
+        return {
+            "ok": result.get("changed", False),
+            "active": True,
+            "mode": result.get("mode", "english"),
+            "level": normalized_level,
+            "focus": "roleplay" if op == "roleplay" else ("shadowing" if op == "shadowing" else normalized_focus),
+            "correction_style": normalized_correction,
+            "instructions": (
+                "English Practice Mode is active. Speak mostly in English, keep "
+                "the conversation flowing, then give concise feedback: correction, "
+                "natural version, and one quick repetition exercise. Use Spanish "
+                "only for short clarifications if Isaac is stuck."
+            ),
+        }
+    if op in {"stop", "off", "disable", "deactivate", "finish", "end"}:
+        result = ctx.modes.set_mode("general")
+        return {
+            "ok": result.get("changed", False),
+            "active": False,
+            "mode": result.get("mode", "general"),
+            "instructions": "English Practice Mode is off. Return to Jarvis default Spanish behavior.",
+        }
+    if op == "status":
+        current = ctx.modes.get_mode()
+        return {
+            "ok": True,
+            "active": current.get("mode") == "english",
+            **current,
+        }
+    return {
+        "ok": False,
+        "error": f"accion English Practice invalida: {action}",
+        "valid_actions": ["start", "stop", "status", "roleplay", "shadowing"],
+    }
 
 
 def jarvis_security_status(ctx: ToolContext) -> dict:
@@ -1255,6 +1630,7 @@ class ToolDispatcher:
         self.ctx = ctx
         self._tools: dict[str, Callable[..., dict | ToolResult]] = {
             "jarvis_recall": lambda **kw: jarvis_recall(ctx, **kw),
+            "jarvis_session_recall": lambda **kw: jarvis_session_recall(ctx, **kw),
             "jarvis_remember": lambda **kw: jarvis_remember(ctx, **kw),
             "jarvis_browse": lambda **kw: jarvis_browse(ctx, **kw),
             "jarvis_link": lambda **kw: jarvis_link(ctx, **kw),
@@ -1262,11 +1638,14 @@ class ToolDispatcher:
             "screen_look": lambda **kw: screen_look(ctx, **kw),
             "chrome_read_page": lambda **kw: chrome_read_page(**kw),
             "study_mode": lambda **kw: study_mode(ctx, **kw),
+            "obs_memory": lambda **kw: obs_memory(ctx, **kw),
             "jarvis_run_safe_command": lambda **kw: jarvis_run_safe_command(ctx, **kw),
             "jarvis_open_powershell": lambda **kw: jarvis_open_powershell(ctx, **kw),
             "jarvis_open_url": lambda **kw: jarvis_open_url(ctx, **kw),
             "jarvis_set_mode": lambda **kw: jarvis_set_mode(ctx, **kw),
             "jarvis_get_mode": lambda **kw: jarvis_get_mode(ctx),
+            "jarvis_listen_mode": lambda **kw: jarvis_listen_mode(ctx, **kw),
+            "english_practice": lambda **kw: english_practice(ctx, **kw),
             "jarvis_security_status": lambda **kw: jarvis_security_status(ctx),
             "spotify_control": lambda **kw: {
                 "ok": True,
