@@ -150,3 +150,19 @@ def test_budget_generous_keeps_everything(tmp_path):
 
     assert "card" in result.sources
     assert any(s.startswith("rag:") for s in result.sources)
+
+
+class ExplodingRAG:
+    def search(self, query, top_k=3):
+        raise RuntimeError("boom")
+
+
+def test_rag_failure_does_not_break_assembly(tmp_path):
+    vault = ObsidianVault(tmp_path, read_all=True)
+    _write_card(vault, "Polymath IDE", "# Polymath IDE - Memory Card\n\n## Pending\n- algo\n")
+
+    result = build_project_context(vault, ExplodingRAG(), "Polymath IDE")
+
+    assert "card" in result.sources          # la card sobrevive
+    assert not any(s.startswith("rag:") for s in result.sources)
+    assert result.text != ""
