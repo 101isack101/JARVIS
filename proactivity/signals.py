@@ -91,3 +91,69 @@ def detect_startup_signals(
     signals.extend(_stale_project(states, cfg))
     signals.extend(_open_loop(states, cfg))
     return signals
+
+
+from memory import triage as triage_mod
+
+CROSS_MIN_SCORE = 0.35
+
+
+def _ctx_pending(active_project: str | None, states: list[ProjectState]) -> list[Signal]:
+    if not active_project:
+        return []
+    by_name = {st.project: st for st in states}
+    st = by_name.get(active_project)
+    if st is None or not st.open_pendings:
+        return []
+    return [
+        Signal(
+            kind="ctx_pending",
+            project=active_project,
+            payload={"pending": st.open_pendings[0]},
+            base_priority=0.7,
+            evidence=[f"card:{active_project}"],
+        )
+    ]
+
+
+def _cross_project(turn_text: str, active_project: str | None, rag) -> list[Signal]:
+    try:
+        results = rag.search(turn_text, top_k=3)
+    except Exception:
+        return []
+    out: list[Signal] = []
+    for r in results or []:
+        if getattr(r, "score", 0.0) < CROSS_MIN_SCORE:
+            continue
+        title = getattr(r.chunk, "title", "") or ""
+        rel = getattr(r.chunk, "rel_path", "") or ""
+        # heurística: si la nota relevante NO es del proyecto activo, es una
+        # conexión cross-proyecto (intuición).
+        if active_project and active_project.lower() in (title + " " + rel).lower():
+            continue
+        snippet = " ".join((r.chunk.text or "").split())[:200]
+        out.append(
+            Signal(
+                kind="cross_project",
+                project=active_project or title,
+                payload={"snippet": snippet, "source_title": title},
+                base_priority=0.55,
+                evidence=[rel or title],
+            )
+        )
+        break  # una conexión cross por turno basta (anti-ruido)
+    return out
+
+
+def detect_contextual_signals(
+    turn_text: str,
+    states: list[ProjectState],
+    rag,
+    cfg: ProactivityConfig,
+) -> list[Signal]:
+    """Señales que dependen del texto del turno (detección en tiempo real)."""
+    active = triage_mod.detect_project(turn_text or "")
+    signals: list[Signal] = []
+    signals.extend(_ctx_pending(active, states))
+    signals.extend(_cross_project(turn_text or "", active, rag))
+    return signals
