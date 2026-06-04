@@ -49,3 +49,58 @@ def test_dedup_same_id_not_offered_twice_in_session(tmp_path):
     assert top is not None
     q.mark_offered(top.id)
     assert q.top_opportunity() is None  # ya ofrecida en esta sesión
+
+
+from datetime import datetime, timedelta
+
+
+def test_dismissed_in_cooldown_is_suppressed(tmp_path):
+    cfg = ProactivityConfig(min_score=0.0, cooldown_days=7)
+    path = tmp_path / "state.json"
+    q1 = OpportunityQueue(path, config=cfg)
+    q1.ingest([_signal()])
+    opp = q1.top_opportunity()
+    q1.mark_dismissed(opp.id)
+
+    q2 = OpportunityQueue(path, config=cfg)
+    q2.ingest([_signal()])
+    assert q2.top_opportunity() is None
+
+
+def test_dismissed_after_cooldown_reappears(tmp_path):
+    cfg = ProactivityConfig(min_score=0.0, cooldown_days=7)
+    path = tmp_path / "state.json"
+    q1 = OpportunityQueue(path, config=cfg)
+    q1.ingest([_signal()])
+    opp = q1.top_opportunity()
+    q1.mark_dismissed(opp.id)
+    import json
+    hist = json.loads(path.read_text(encoding="utf-8"))
+    hist[opp.id]["dismissed_at"] = (datetime.now() - timedelta(days=30)).isoformat()
+    path.write_text(json.dumps(hist), encoding="utf-8")
+
+    q2 = OpportunityQueue(path, config=cfg)
+    q2.ingest([_signal()])
+    assert q2.top_opportunity() is not None
+
+
+def test_max_per_session_caps_offers(tmp_path):
+    cfg = ProactivityConfig(min_score=0.0, max_per_session=1)
+    q = OpportunityQueue(tmp_path / "state.json", config=cfg)
+    q.ingest([
+        _signal(project="Polymath IDE"),
+        _signal(project="MTurk HITL Agent"),
+    ])
+    first = q.top_opportunity()
+    assert first is not None
+    q.mark_offered(first.id)
+    assert q.top_opportunity() is None
+
+
+def test_corrupt_state_file_does_not_crash(tmp_path):
+    path = tmp_path / "state.json"
+    path.write_text("{ not json", encoding="utf-8")
+    cfg = ProactivityConfig(min_score=0.0)
+    q = OpportunityQueue(path, config=cfg)
+    q.ingest([_signal()])
+    assert q.top_opportunity() is not None

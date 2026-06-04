@@ -96,10 +96,28 @@ class OpportunityQueue:
             )
             self._candidates.append(opp)
 
+    def _in_cooldown(self, opp_id: str, now: datetime) -> bool:
+        rec = self._history.get(opp_id)
+        if not rec:
+            return False
+        dismissed = rec.get("dismissed_at")
+        if not dismissed:
+            return False
+        try:
+            when = datetime.fromisoformat(dismissed)
+        except (ValueError, TypeError):
+            return False
+        return (now - when) < timedelta(days=self.config.cooldown_days)
+
     def top_opportunity(self, *, now: datetime | None = None) -> Opportunity | None:
+        now = now or datetime.now()
+        if len(self._offered_this_session) >= self.config.max_per_session:
+            return None
         ranked = sorted(self._candidates, key=lambda o: o.score, reverse=True)
         for opp in ranked:
             if opp.id in self._offered_this_session:
+                continue
+            if self._in_cooldown(opp.id, now):
                 continue
             return opp
         return None
