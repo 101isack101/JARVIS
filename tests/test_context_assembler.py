@@ -59,3 +59,27 @@ def test_missing_card_does_not_crash(tmp_path):
 
     assert result.project == "Polymath IDE"
     assert "card" not in result.sources
+
+
+def _write_session(vault, name, text):
+    # SESSIONS_SUBDIR real es "sessions" (no "Sesiones" como asumía el plan)
+    base = vault.memory_path / "sessions"
+    base.mkdir(parents=True, exist_ok=True)
+    (base / name).write_text(text, encoding="utf-8")
+
+
+def test_includes_session_recall_when_present(tmp_path):
+    vault = ObsidianVault(tmp_path, read_all=True)
+    rag = FakeRAG()
+    _write_card(vault, "Polymath IDE", "# Polymath IDE - Memory Card\n\n## Pending\n- algo\n")
+    _write_session(
+        vault,
+        "2026-05-29_2100_sesion.md",
+        "# Sesión\n\n## Resumen\nTrabajamos en el editor Monaco.\n\n## Pendientes\n- conectar el agente\n",
+    )
+
+    result = build_project_context(vault, rag, "sigamos con Polymath IDE")
+
+    assert "session" in result.sources
+    assert "Monaco" in result.text or "conectar el agente" in result.text
+    assert "Sesión anterior" in result.text

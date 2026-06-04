@@ -77,6 +77,16 @@ def build_project_context(
         sections.append(("Memory Card", card))
         sources.append("card")
 
+    from . import session_summary  # import local: evita ciclo en import time
+
+    try:
+        recall = session_summary.load_last_summary(vault, RECALL_MAX_CHARS)
+    except Exception:
+        recall = None
+    if recall and recall.strip():
+        sections.append(("Sesión anterior", recall))
+        sources.append("session")
+
     if not sections:
         return ContextResult(text="", project=project, sources=[])
 
