@@ -2,7 +2,7 @@
 jarvis.py - Entry point orquestador de Jarvis.
 
 Une todos los modulos:
-  - JarvisOverlay (tkinter, main thread)
+  - Overlay UI (web premium by default, tkinter fallback)
   - HotkeyListener (Ctrl PTT + toggles, su propio thread)
   - JarvisSession (Gemini Live, su propio thread asyncio)
   - AudioCapture + AudioPlayer (sounddevice, callbacks de audio thread)
@@ -36,10 +36,13 @@ sys.path.insert(0, str(ROOT))
 from actions.executor import SafeActionExecutor
 from audio.capture import AudioCapture
 from audio.playback import AudioPlayer
+from audio.aec import AECStream, resample_24k_to_16k
 from audio.vad import VADGate
+from audio.wakeword import WakeWordGate
 from claude.reasoner import ClaudeReasoner
 from gemini.session import JarvisSession, SessionCallbacks, SessionConfig
 from gemini.system_prompt import SYSTEM_PROMPT
+from jarvis_version import JARVIS_VERSION_LABEL
 from memory.indexer import IncrementalIndexer
 from memory import notes as notes_mod
 from memory.obsidian_vault import ObsidianVault
@@ -48,12 +51,17 @@ from memory.session_journal import SessionJournal
 from memory.session_summary import (
     synthesize_and_save,
     load_last_summary,
+    load_recent_summaries,
     build_recall_block,
+    build_recent_recall_block,
 )
 from memory.tools import ToolContext, ToolDispatcher, make_tool_object
+from proactivity.config import ProactivityConfig
+from proactivity.engine import ProactivityEngine
 from mcp_obsidian.client import ObsidianMCPClient
+from obs_memory import OBSMemoryController
+from overlay.factory import create_overlay
 from overlay.hotkeys import HotkeyCallbacks, HotkeyListener
-from overlay.window import JarvisOverlay
 from runtime_modes import ModeManager
 from runtime_preferences import ensure_runtime_preferences, preferences_prompt_block
 from security.approvals import ApprovalBroker
@@ -79,20 +87,33 @@ THINKING_WATCHDOG_MS = 15_000
 # auto-interrumpa la respuesta de Gemini antes de que pueda articularla.
 LIBRE_ACTIVITY_COOLDOWN_MS = 600
 
+# Barge-in en LIBRE: cortar a Jarvis hablandole encima, sin tocar el teclado.
+# Se dispara con una WAKE-WORD ("Hey JARVIS") en vez de energia/VAD: el eco de
+# la propia voz de Jarvis tiene la misma energia que tu voz (medido: picos ~0.08)
+# y un umbral no los separa, pero el eco NUNCA pronuncia la frase clave. Asi el
+# wake-word elimina los falsos positivos del eco y mantiene el manos-libres.
+# Ver audio/wakeword.py. Dependencia opcional (openWakeWord); si falta, el
+# barge-in se desactiva con gracia.
+LIBRE_BARGE_IN_DEFAULT = True
+WAKEWORD_MODEL_DEFAULT = "hey_jarvis"
+WAKEWORD_THRESHOLD_DEFAULT = 0.5
+
 # Hints humanos para mostrar en el overlay cuando arranca un tool.
 # Solo se muestran tools "lentos" (>1s tipicos) — los rapidos no necesitan
 # feedback porque Jarvis responde casi inmediatamente despues.
 TOOL_HINTS: dict[str, str] = {
-    "ask_claude_deep": "Consultando con Claude…",
-    "screen_look": "Mirando tu pantalla…",
-    "chrome_read_page": "Leyendo Chrome…",
-    "study_mode": "Study Mode trabajando…",
-    "jarvis_recall": "Buscando en tus notas…",
-    "jarvis_browse": "Listando notas…",
-    "jarvis_remember": "Guardando en tu vault…",
-    "obsidian_mcp": "Operando en Obsidian…",
-    "jarvis_run_safe_command": "Ejecutando comando…",
-    "spotify_control": "Controlando Spotify…",
+    "ask_claude_deep": "Consultando con Claude...",
+    "screen_look": "Mirando tu pantalla...",
+    "chrome_read_page": "Leyendo Chrome...",
+    "study_mode": "Study Mode trabajando...",
+    "obs_memory": "Procesando memoria OBS...",
+    "jarvis_recall": "Buscando en tus notas...",
+    "jarvis_session_recall": "Buscando en sesiones anteriores...",
+    "jarvis_browse": "Listando notas...",
+    "jarvis_remember": "Guardando en tu vault...",
+    "obsidian_mcp": "Operando en Obsidian...",
+    "jarvis_run_safe_command": "Ejecutando comando...",
+    "spotify_control": "Controlando Spotify...",
 }
 
 # Per-tool timeouts. ask_claude_deep tipicamente tarda 8-15s en prompts
@@ -102,6 +123,7 @@ TOOL_HINTS: dict[str, str] = {
 TOOL_TIMEOUTS_S: dict[str, float] = {
     "ask_claude_deep": 30.0,
     "study_mode": 60.0,
+    "obs_memory": 900.0,
     "chrome_read_page": 20.0,
 }
 
@@ -123,8 +145,10 @@ class Jarvis:
         self.session_recall_max_chars = int(
             os.environ.get("JARVIS_SESSION_RECALL_MAX_CHARS", "1000")
         )
+        self.session_recent_limit = int(os.environ.get("JARVIS_SESSION_RECENT_LIMIT", "5"))
         self.session_journal = SessionJournal(ROOT / "data" / "session_journal.jsonl")
         self._session_saved = False  # guard idempotente para síntesis en stop()
+        self._startup_notices: list[tuple[str, str]] = []
         # Índice del último volcado a journal por turno (delta, no acumulado).
         self._journal_input_idx = 0
         self._journal_output_idx = 0
@@ -133,6 +157,46 @@ class Jarvis:
         # Timestamp del ultimo activity_end disparado por VAD en LIBRE.
         # Usado para suprimir activity_start inmediato (anti-rebote de "uhm").
         self._last_activity_end_ms: int = 0
+
+        # --- Barge-in en LIBRE por wake-word ("Hey JARVIS") ---
+        self._barge_in_enabled = (
+            os.environ.get("JARVIS_LIBRE_BARGE_IN", str(LIBRE_BARGE_IN_DEFAULT)).lower()
+            in ("true", "1", "yes")
+        )
+        self._wakeword_model = os.environ.get(
+            "JARVIS_WAKEWORD_MODEL", WAKEWORD_MODEL_DEFAULT
+        )
+        self._wakeword_threshold = float(
+            os.environ.get("JARVIS_WAKEWORD_THRESHOLD", str(WAKEWORD_THRESHOLD_DEFAULT))
+        )
+        # Detector wake-word (lazy: se carga al entrar en LIBRE). None = aun no
+        # cargado o dependencia ausente (barge-in degradado).
+        self._wakeword: WakeWordGate | None = None
+        # True mientras Jarvis reproduce su voz en LIBRE (ventana de barge-in).
+        self._libre_speaking = False
+        # Pico de score wake-word del turno hablado actual (diagnostico): nos
+        # dice si tu "Hey JARVIS" se acerco al umbral o si el eco lo enmascara.
+        self._wakeword_peak = 0.0
+
+        # --- AEC: cancelacion de eco para que el wake-word funcione en parlantes ---
+        # Limpia la voz de Jarvis del mic ANTES de detectar el wake-word. El
+        # player empuja su salida como referencia (far-end); el mic se procesa
+        # contra ella. Sin AEC el eco enmascara/iguala tu voz (probado 3 veces).
+        self._aec_enabled = (
+            self._barge_in_enabled
+            and os.environ.get("JARVIS_AEC", "true").lower() in ("true", "1", "yes")
+        )
+        self._aec = (
+            AECStream(
+                block=512,
+                partitions=int(os.environ.get("JARVIS_AEC_PARTITIONS", "8")),
+                mu=float(os.environ.get("JARVIS_AEC_MU", "0.3")),
+            )
+            if self._aec_enabled
+            else None
+        )
+        # Pico de ERLE (dB de eco cancelado) del turno hablado, para diagnostico.
+        self._aec_erle_peak = 0.0
 
         # Telemetria (compartida)
         self.tracker = TokenTracker()
@@ -183,21 +247,52 @@ class Jarvis:
                         session_id=self.session_id,
                     )
                     if p is not None:
+                        self._startup_notices.append(("Memoria pendiente consolidada", "ok"))
                         try:
                             self.rag.index_file(p)
                             self.rag.save()
                         except Exception as exc:
                             log.warning(f"[WARN] no se indexó nota huérfana: {exc}")
+                    else:
+                        self._startup_notices.append(("Memoria pendiente sin consolidar", "warn"))
             except Exception as exc:
                 log.warning(f"[WARN] síntesis diferida falló: {exc}")
             try:
-                prev = load_last_summary(self.vault, self.session_recall_max_chars)
-                recall_block = build_recall_block(prev)
+                recent = load_recent_summaries(
+                    self.vault,
+                    limit=self.session_recent_limit,
+                    max_chars_each=self.session_recall_max_chars,
+                )
+                recall_block = build_recent_recall_block(recent)
+                if not recall_block:
+                    prev = load_last_summary(self.vault, self.session_recall_max_chars)
+                    recall_block = build_recall_block(prev)
                 if recall_block:
                     log.info("Contexto de sesión anterior inyectado al system_prompt.")
             except Exception as exc:
                 log.warning(f"[WARN] recall de sesión previa falló: {exc}")
 
+        # Fase 3 — Proactividad: motor + briefing de arranque.
+        self.proactivity = None
+        briefing_block = ""
+        try:
+            pcfg = ProactivityConfig.from_env()
+            if pcfg.enabled:
+                self.proactivity = ProactivityEngine(
+                    config=pcfg,
+                    state_path=Path("data") / "proactivity_state.json",
+                )
+                briefing_block = self.proactivity.build_briefing(self.vault)
+                if briefing_block:
+                    log.info("Briefing proactivo inyectado al system_prompt.")
+        except Exception as exc:
+            log.warning(f"[WARN] proactividad (arranque) falló: {exc}")
+
+        self.obs_memory = OBSMemoryController(
+            vault=self.vault,
+            reasoner=self.reasoner,
+            on_job_done=self._on_obs_memory_job_done,
+        )
         self.tool_ctx = ToolContext(
             vault=self.vault,
             rag=self.rag,
@@ -208,7 +303,10 @@ class Jarvis:
             actions=self.actions,
             modes=self.modes,
             obsidian_mcp=self.obsidian_mcp,
+            obs_memory=self.obs_memory,
             approvals=self.approvals,
+            set_listen_mode=self._apply_listen_mode,
+            proactivity=self.proactivity,
         )
         self.dispatcher = ToolDispatcher(self.tool_ctx)
         self.indexer = IncrementalIndexer(
@@ -217,12 +315,17 @@ class Jarvis:
         )
 
         # Audio
-        self.player = AudioPlayer(on_underflow=self._on_playback_complete)
+        self.player = AudioPlayer(
+            on_underflow=self._on_playback_complete,
+            on_playback=self._on_player_output if self._barge_in_enabled else None,
+        )
         self.capture = AudioCapture(on_chunk=self._on_audio_chunk)
         self.vad: VADGate | None = None  # lazy load en modo libre
 
         # Overlay
-        self.overlay = JarvisOverlay(self.tracker, self.gate, on_close=self.stop)
+        self.overlay = create_overlay(self.tracker, self.gate, on_close=self.stop)
+        for message, level in self._startup_notices:
+            self.overlay.log_event(message, level)
         self.approvals.set_handler(
             lambda action: self._tk(
                 lambda: self.overlay.show_approval(action, self.approvals.resolve)
@@ -271,6 +374,7 @@ class Jarvis:
                     + "\n\n"
                     + preferences_prompt_block(self.preferences)
                     + (("\n\n" + recall_block) if recall_block else "")
+                    + (("\n\n" + briefing_block) if briefing_block else "")
                 ),
                 manual_activity_mode=True,
                 enable_input_transcription=True,
@@ -278,9 +382,35 @@ class Jarvis:
                 tracker=self.tracker,
                 tool_dispatcher=self.dispatcher,
                 tool_timeouts_s=TOOL_TIMEOUTS_S,
+                context_compression=(
+                    os.environ.get("JARVIS_CONTEXT_COMPRESSION", "true").lower()
+                    in ("true", "1", "yes")
+                ),
+                context_trigger_tokens=int(
+                    os.environ.get("JARVIS_CONTEXT_TRIGGER_TOKENS", "25600")
+                ),
+                context_target_tokens=int(
+                    os.environ.get("JARVIS_CONTEXT_TARGET_TOKENS", "12800")
+                ),
             ),
             callbacks=session_callbacks,
         )
+
+    def _on_obs_memory_job_done(self, job: dict) -> None:
+        title = job.get("title") or "OBS"
+        note_path = job.get("note_path") or ""
+        status = job.get("status") or ""
+        if status == "done":
+            suffix = f" -> {note_path}" if note_path else ""
+            self._log(f"[OBS] analisis listo: {title}{suffix}")
+            self._tk(lambda: self.overlay.log_event(f"OBS listo: {title}", "ok"))
+            self._tk(lambda: self.overlay.append_output(f"\n[OBS Memory listo: {title}{suffix}]\n"))
+            return
+
+        error = job.get("error") or "sin detalle"
+        self._log(f"[WARN] OBS Memory fallo: {title}: {error}")
+        self._tk(lambda: self.overlay.log_event(f"OBS fallo: {title}", "error"))
+        self._tk(lambda: self.overlay.append_output(f"\n[OBS Memory fallo: {title} - {error}]\n"))
 
     # ---- Lifecycle ----
 
@@ -329,9 +459,7 @@ class Jarvis:
     # ---- Hotkey handlers (llamados desde thread de keyboard) ----
 
     def _on_ptt_press(self) -> None:
-        if not self.gate.can_invoke(self.tracker, "gemini"):
-            self._log("[PTT] press IGNORADO: gemini bloqueado por budget")
-            self._set_overlay_state("blocked")
+        if not self._gemini_budget_available("[PTT] press"):
             return
         if self.mode != "PTT":
             self._log("[PTT] press IGNORADO: estamos en modo LIBRE")
@@ -353,13 +481,34 @@ class Jarvis:
         self._set_overlay_state("thinking")
 
     def _on_toggle_mode(self) -> None:
-        if self.mode == "PTT":
+        """Hotkey Ctrl+Shift+M: alterna entre el modo actual y el contrario."""
+        self._apply_listen_mode("PTT" if self.mode == "LIBRE" else "LIBRE")
+
+    def _apply_listen_mode(self, target: str) -> dict:
+        """Aplica un modo de escucha concreto (PTT/LIBRE) de forma idempotente.
+
+        Punto unico de verdad: lo usan la hotkey (_on_toggle_mode) y la tool de
+        voz `jarvis_listen_mode`. Devuelve un dict serializable para que la tool
+        pueda informar el resultado a Gemini.
+        """
+        target = (target or "").strip().upper()
+        if target not in ("PTT", "LIBRE"):
+            return {"ok": False, "error": f"modo de escucha invalido: {target}"}
+        if target == self.mode:
+            return {"ok": True, "mode": self.mode, "changed": False}
+
+        if target == "LIBRE":
             self.mode = "LIBRE"
             if self.vad is None:
                 self._log("Cargando Silero VAD para modo libre...")
                 self.vad = VADGate()
             self.vad.reset()
+            if self._barge_in_enabled:
+                self._ensure_wakeword()
+            if self._aec is not None:
+                self._aec.reset()
             self._libre_in_activity = False
+            self._libre_speaking = False
             self.capture.start_recording()
             self._log("[MODE] LIBRE activado. VAD controla activity_start/end.")
             self._tk(lambda: self.overlay.set_mode("LIBRE"))
@@ -367,6 +516,9 @@ class Jarvis:
         else:
             self.mode = "PTT"
             self.capture.stop_recording()
+            self._libre_speaking = False
+            if self._aec is not None:
+                self._aec.reset()
             # Si VAD dejo activity abierta, cerrarla
             if getattr(self, "_libre_in_activity", False):
                 self.session.end_user_activity()
@@ -374,6 +526,7 @@ class Jarvis:
             self._log("[MODE] PTT restaurado.")
             self._tk(lambda: self.overlay.set_mode("PTT"))
             self._set_overlay_state("idle")
+        return {"ok": True, "mode": self.mode, "changed": True}
 
     def _on_kill(self) -> None:
         self._log("KILL recibido -> salida dura")
@@ -387,6 +540,7 @@ class Jarvis:
         try:
             shot = self.screen.capture()
             self._log(f"[SCREEN] capturada {shot.width}x{shot.height}: {shot.path.name}")
+            self._tk(lambda: self.overlay.log_event("Pantalla capturada", "ok"))
             self._set_overlay_state("thinking")
             self.session.send_image(
                 shot.png_bytes,
@@ -427,6 +581,7 @@ class Jarvis:
         try:
             shot = self.screen.capture_region(bbox)
             self._log(f"[REGION] {shot.width}x{shot.height}: {shot.path.name}")
+            self._tk(lambda: self.overlay.log_event("Region capturada", "ok"))
             self._set_overlay_state("thinking")
             self.session.send_image(
                 shot.png_bytes,
@@ -440,11 +595,22 @@ class Jarvis:
     # ---- Audio chunk -> Gemini (thread de sounddevice) ----
 
     def _on_audio_chunk(self, pcm_bytes: bytes) -> None:
+        if not self._gemini_budget_available("[AUDIO] chunk"):
+            if getattr(self, "_libre_in_activity", False):
+                self.session.end_user_activity()
+                self._libre_in_activity = False
+            return
         # En modo LIBRE, VAD local controla activity boundaries.
         # En modo PTT, los maneja la hotkey (press = start, release = end).
         if self.mode == "LIBRE" and self.vad is not None:
-            # Echo guard: ignorar mic mientras Jarvis habla por altavoces.
-            # Sin esto, el VAD detecta la voz de Jarvis como input y la interrumpe.
+            # Mientras Jarvis habla:
+            #  - barge-in ON: el mic sigue vivo; buscamos voz tuya sostenida y
+            #    de alta confianza para cortarlo. Nada de esto se manda a Gemini
+            #    hasta que el barge-in se confirma (ver _trigger_barge_in).
+            #  - barge-in OFF: echo guard clasico, ignoramos el mic.
+            if self._libre_speaking:
+                self._detect_barge_in(pcm_bytes)
+                return
             if self.player.is_playing():
                 return
             import time as _time
@@ -452,6 +618,8 @@ class Jarvis:
             events = self.vad.feed(pcm_bytes)
             for ev in events:
                 if ev.kind == "start":
+                    if not self._gemini_budget_available("[VAD] activity_start"):
+                        return
                     cooldown_remaining = LIBRE_ACTIVITY_COOLDOWN_MS - (now_ms - self._last_activity_end_ms)
                     if cooldown_remaining > 0:
                         self._log(f"[VAD] voz detectada IGNORADA: cooldown post-activity_end ({cooldown_remaining}ms restantes)")
@@ -475,6 +643,71 @@ class Jarvis:
         self.session.send_audio_chunk(pcm_bytes)
         self._audio_chunks_sent = getattr(self, "_audio_chunks_sent", 0) + 1
 
+    def _gemini_budget_available(self, source: str) -> bool:
+        if self.gate.can_invoke(self.tracker, "gemini"):
+            return True
+        self._log(f"{source} IGNORADO: gemini bloqueado por budget")
+        self._set_overlay_state("blocked")
+        return False
+
+    def _on_player_output(self, pcm24k_bytes: bytes) -> None:
+        """Referencia (far-end) para el AEC: lo que sale al parlante.
+
+        Llamado desde el thread de salida de sounddevice. Resamplea 24k->16k y
+        lo encola en el AEC. Debe ser rapido (resampleo + append con lock).
+        """
+        if self._aec is None or not pcm24k_bytes:
+            return
+        try:
+            far24 = np.frombuffer(pcm24k_bytes, dtype=np.int16).astype(np.float32) / 32768.0
+            self._aec.push_far(resample_24k_to_16k(far24))
+        except Exception:
+            pass
+
+    def _detect_barge_in(self, pcm_bytes: bytes) -> None:
+        """Detecta la wake-word mientras Jarvis habla, para cortarlo (LIBRE).
+
+        Llamado desde el thread worker de captura con el mic VIVO durante el
+        playback. Pipeline: AEC (quita el eco de la voz de Jarvis del mic) ->
+        wake-word ("Hey JARVIS") sobre la senal LIMPIA. El AEC es lo que hace
+        viable la deteccion en parlantes; sin el, el eco enmascara tu voz.
+        """
+        if self._wakeword is None or not self._libre_speaking:
+            return
+        # Cancelar el eco antes de detectar. Si AEC desactivado, usa el mic crudo.
+        if self._aec is not None:
+            pcm_bytes = self._aec.process_near(pcm_bytes)
+            if self._aec.last_erle_db > self._aec_erle_peak:
+                self._aec_erle_peak = self._aec.last_erle_db
+        score = self._wakeword.predict(pcm_bytes)
+        if score > self._wakeword_peak:
+            self._wakeword_peak = score
+        if score >= self._wakeword.threshold:
+            self._log(
+                f"[BARGE-IN] wake-word '{self._wakeword.model_name}' "
+                f"detectada (score={score:.2f}) -> corto a Jarvis"
+            )
+            self._trigger_barge_in()
+
+    def _trigger_barge_in(self) -> None:
+        """Confirma el barge-in: corta a Jarvis y abre tu turno de inmediato."""
+        self._libre_speaking = False
+        discarded = self.player.interrupt()  # silencia a Jarvis YA
+        self.latency.mark_interrupted()
+        self._log(f"[BARGE-IN] interrumpo a Jarvis ({discarded} chunks descartados)")
+        if self._wakeword is not None:
+            self._wakeword.reset()  # limpiar buffer para el proximo turno
+        if self._aec is not None:
+            self._aec.reset()
+        if self.vad is not None:
+            self.vad.reset()  # estado limpio para tu nuevo turno
+        # Sin cooldown: querés hablar ahora mismo. Abrimos activity de usuario.
+        self._last_activity_end_ms = 0
+        if not getattr(self, "_libre_in_activity", False):
+            self._libre_in_activity = True
+            self.session.start_user_activity()
+        self._set_overlay_state("listening")
+
     # ---- Eventos de la sesion Gemini (thread asyncio) ----
 
     def _on_connected(self) -> None:
@@ -487,11 +720,25 @@ class Jarvis:
         # Marca TTFB en el primer chunk del turno. LatencyTracker.mark_first_audio
         # es idempotente por turno: solo cuenta la primera llamada.
         self.latency.mark_first_audio()
-        # En LIBRE: silenciar mic mientras Jarvis habla (anti-echo).
-        # Se reanuda en _on_playback_complete cuando la cola del player se vacia.
+        # En LIBRE manejamos el eco segun haya wake-word disponible:
+        #  - con wake-word: dejamos el mic VIVO para escuchar "Hey JARVIS" y
+        #    poder cortar a Jarvis. Marcamos el inicio del turno hablado (1 vez)
+        #    y limpiamos el buffer del detector.
+        #  - sin wake-word (dep ausente o barge-in off): comportamiento clasico,
+        #    silenciamos el mic (anti-echo); se reanuda en _on_playback_complete.
         if self.mode == "LIBRE":
-            self.capture.stop_recording()
+            if self._barge_in_enabled and self._wakeword is not None:
+                if not self._libre_speaking:
+                    self._libre_speaking = True
+                    self._wakeword_peak = 0.0
+                    self._aec_erle_peak = 0.0
+                    self._wakeword.reset()
+                    if self._aec is not None:
+                        self._aec.reset()
+            else:
+                self.capture.stop_recording()
         self._set_overlay_state("speaking")
+        self._tk(lambda b=pcm_bytes: self.overlay.feed_voice_audio(b))
         self.player.push(pcm_bytes)
 
     def _on_gemini_text(self, text: str) -> None:
@@ -509,7 +756,7 @@ class Jarvis:
         self._log(f"Interrumpido (descarte {n} chunks de audio)")
         self._set_overlay_state("listening")
 
-    def _on_tool_start(self, name: str) -> None:
+    def _on_tool_start(self, name: str, args: dict | None = None) -> None:
         """Llamado desde JarvisSession antes de despachar un tool.
 
         Muestra hint humano en el overlay para que Isaac sepa que Jarvis
@@ -517,16 +764,20 @@ class Jarvis:
         donde Gemini queda mudo varios segundos esperando el response).
         """
         hint = TOOL_HINTS.get(name)
+        self._tk(lambda: self.overlay.record_memory_tool_start(name, args or {}))
         if not hint:
             return
+        self._tk(lambda: self.overlay.log_event(hint.rstrip(".")))
         self._tk(lambda: self.overlay.append_output(f"\n[{hint}]\n"))
 
-    def _on_tool_end(self, name: str, elapsed_ms: float, ok: bool) -> None:
+    def _on_tool_end(self, name: str, elapsed_ms: float, ok: bool, response=None) -> None:
         """Llamado tras el dispatch. Solo logueo aqui; el overlay no necesita
         confirmacion explicita porque la respuesta de Jarvis llegara enseguida."""
         self.latency.record_tool(name, elapsed_ms)
+        self._tk(lambda: self.overlay.record_memory_tool_end(name, elapsed_ms, ok, response))
         if not ok:
             self._log(f"[TOOL] {name} fallo o timeout tras {elapsed_ms:.0f}ms")
+            self._tk(lambda: self.overlay.log_event(f"Tool fallo: {name}", "error"))
 
     def _on_turn_complete(self) -> None:
         # Cierra metricas del turno y loguea una linea condensada con TTFB.
@@ -554,6 +805,12 @@ class Jarvis:
                 self._journal_output_idx = len(self._output_transcript)
                 if user_delta or jarvis_delta:
                     self.session_journal.append_turn(user_delta, jarvis_delta)
+                # Fase 3 — Proactividad: observar el turno (encola, NO emite).
+                if self.proactivity is not None and user_delta:
+                    try:
+                        self.proactivity.observe(self.vault, self.rag, user_delta)
+                    except Exception as exc:
+                        self._log(f"[WARN] proactividad (observe) falló: {exc}")
             except Exception as exc:
                 self._log(f"[WARN] journal append falló: {exc}")
 
@@ -565,8 +822,24 @@ class Jarvis:
         """
         if self.mode != "LIBRE" or self._stopping:
             return
+        # Jarvis termino de hablar sin barge-in: cerrar la ventana de barge-in.
+        # Diagnostico: si el pico de wake-word fue notable pero no llego al
+        # umbral, lo logueamos para poder calibrar (eco vs umbral vs acento).
+        if self._libre_speaking and self._wakeword is not None and self._wakeword_peak > 0.1:
+            erle = f", AEC ERLE peak={self._aec_erle_peak:.1f}dB" if self._aec is not None else ""
+            self._log(
+                f"[BARGE-IN] wake-word peak={self._wakeword_peak:.2f} este turno "
+                f"(umbral {self._wakeword.threshold:.2f}){erle} — no disparo"
+            )
+        self._libre_speaking = False
+        if self._wakeword is not None:
+            self._wakeword.reset()
+        if self._aec is not None:
+            self._aec.reset()
         if self.vad is not None:
             self.vad.reset()  # limpiar estado VAD por si capto eco residual
+        # Con barge-in ON el mic nunca se detuvo (start_recording es no-op);
+        # con barge-in OFF aqui se reanuda tras el anti-echo.
         self.capture.start_recording()
         self._log("[LIBRE] playback completo -> mic reanudado")
         self._set_overlay_state("listening")
@@ -659,6 +932,28 @@ class Jarvis:
             self._log(f"[WARN] ClaudeReasoner no disponible: {type(exc).__name__}: {exc}")
             return None
 
+    def _ensure_wakeword(self) -> None:
+        """Carga perezosa del detector wake-word para el barge-in (LIBRE).
+
+        Degrada con gracia: si openWakeWord no esta instalado o falla, desactiva
+        el barge-in para la sesion (en vez de crashear). Idempotente.
+        """
+        if self._wakeword is not None or not self._barge_in_enabled:
+            return
+        try:
+            self._log(f"Cargando wake-word '{self._wakeword_model}' para barge-in...")
+            self._wakeword = WakeWordGate(
+                model_name=self._wakeword_model,
+                threshold=self._wakeword_threshold,
+            )
+            self._log("[MODE] Barge-in por wake-word activo. Deci 'Hey JARVIS' para cortar.")
+        except Exception as exc:
+            self._barge_in_enabled = False
+            self._log(
+                f"[WARN] wake-word no disponible ({type(exc).__name__}: {exc}); "
+                "barge-in desactivado. Instala: pip install openwakeword"
+            )
+
     def _save_session_memory(self) -> None:
         """Cierre limpio: sintetiza el journal en una nota-diario fechada.
 
@@ -690,6 +985,7 @@ def main() -> int:
     print("=" * 60)
     print("  JARVIS — Asistente Conversacional Tiempo Real")
     print("  Sesion local · Sonnet 4.6 + Gemini 3.1 Flash Live")
+    print(f"  Version: {JARVIS_VERSION_LABEL}")
     print("=" * 60)
 
     # --- Healthcheck de arranque (fail-fast) ---
