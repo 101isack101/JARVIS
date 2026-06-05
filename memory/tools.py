@@ -60,6 +60,8 @@ class ToolContext:
     # Callback inyectado por Jarvis para cambiar el modo de ESCUCHA (PTT/LIBRE)
     # por voz. Firma: (target: str) -> dict. None si no esta disponible.
     set_listen_mode: Callable[..., dict] | None = None
+    # Motor de proactividad (Fase 3). None si la feature está deshabilitada.
+    proactivity: Any | None = None
 
 
 # =====================================================================
@@ -382,24 +384,35 @@ OBS_MEMORY_DECL = types.FunctionDeclaration(
 JARVIS_RUN_SAFE_COMMAND_DECL = types.FunctionDeclaration(
     name="jarvis_run_safe_command",
     description=(
-        "Ejecuta o simula un comando PowerShell read-only dentro del proyecto Jarvis. "
-        "Respeta JARVIS_MODE: en dev hace dry-run; en prod solo comandos allowlist. "
-        "Nunca usar para SendKeys, WScript.Shell, COM automation, teclado/mouse "
-        "simulado ni abrir terminales."
+        "Ejecuta operaciones read-only estructuradas dentro del proyecto Jarvis. "
+        "No acepta shell libre ni PowerShell arbitrario. Usala para listar archivos, "
+        "leer archivos no sensibles, buscar texto o consultar estado git."
     ),
     parameters=types.Schema(
         type=types.Type.OBJECT,
         properties={
-            "command": types.Schema(
+            "operation": types.Schema(
                 type=types.Type.STRING,
-                description="Comando PowerShell read-only.",
+                description="Operacion: list_dir, read_file, search_text, git_status, git_diff_stat, git_log.",
             ),
-            "cwd": types.Schema(
+            "path": types.Schema(
                 type=types.Type.STRING,
-                description="Directorio de trabajo opcional dentro del proyecto.",
+                description="Path relativo dentro del proyecto. Requerido para read_file; opcional en list_dir/search_text.",
+            ),
+            "query": types.Schema(
+                type=types.Type.STRING,
+                description="Texto a buscar cuando operation=search_text.",
+            ),
+            "max_chars": types.Schema(
+                type=types.Type.INTEGER,
+                description="Maximo de caracteres para read_file. Default 4000, max 20000.",
+            ),
+            "limit": types.Schema(
+                type=types.Type.INTEGER,
+                description="Limite de items/resultados. Default 100, max 500.",
             ),
         },
-        required=["command"],
+        required=["operation"],
     ),
 )
 
@@ -632,6 +645,27 @@ JARVIS_LISTEN_MODE_DECL = types.FunctionDeclaration(
 )
 
 
+JARVIS_PROACTIVE_CHECK_DECL = types.FunctionDeclaration(
+    name="jarvis_proactive_check",
+    description=(
+        "Consulta si JARVIS tiene una sugerencia proactiva pertinente para ofrecer "
+        "AHORA. Llamala SOLO en ventanas naturales: cuando un tema se cierra, cuando "
+        "Isaac pregunta '¿algo mas?', o al cerrar la sesion. NUNCA a media explicacion. "
+        "Devuelve una sola oportunidad estructurada (o ninguna). Si Isaac descarto la "
+        "sugerencia anterior, vuelve a llamarla con dismissed_last=true para no repetirla."
+    ),
+    parameters=types.Schema(
+        type=types.Type.OBJECT,
+        properties={
+            "dismissed_last": types.Schema(
+                type=types.Type.BOOLEAN,
+                description="true si Isaac ignoro/rechazo la sugerencia ofrecida antes.",
+            ),
+        },
+    ),
+)
+
+
 def all_function_declarations() -> list[types.FunctionDeclaration]:
     return [
         JARVIS_RECALL_DECL,
@@ -654,6 +688,7 @@ def all_function_declarations() -> list[types.FunctionDeclaration]:
         JARVIS_SECURITY_STATUS_DECL,
         SPOTIFY_CONTROL_DECL,
         OBSIDIAN_MCP_DECL,
+        JARVIS_PROACTIVE_CHECK_DECL,
     ]
 
 
@@ -692,6 +727,20 @@ def jarvis_session_recall(
         when=when or "",
         limit=limit,
     )
+
+
+def jarvis_proactive_check(ctx: ToolContext, dismissed_last: bool = False) -> dict:
+    """Devuelve la oportunidad proactiva top estructurada (o ninguna). Fail-safe."""
+    engine = ctx.proactivity
+    if engine is None:
+        return {"has_opportunity": False, "opportunity": None}
+    try:
+        if dismissed_last:
+            engine.dismiss_last()
+        struct = engine.next_opportunity()
+    except Exception:
+        return {"has_opportunity": False, "opportunity": None}
+    return {"has_opportunity": struct is not None, "opportunity": struct}
 
 
 def _recall_result_dict(ctx: ToolContext, result) -> dict:
@@ -1231,10 +1280,31 @@ def _require_obs_approval(
     return None
 
 
-def jarvis_run_safe_command(ctx: ToolContext, command: str, cwd: str | None = None) -> dict:
+def jarvis_run_safe_command(
+    ctx: ToolContext,
+    operation: str | None = None,
+    path: str | None = None,
+    query: str | None = None,
+    max_chars: int | None = None,
+    limit: int | None = None,
+    command: str | None = None,
+    cwd: str | None = None,
+) -> dict:
     if ctx.actions is None:
         return {"executed": False, "error": "SafeActionExecutor no configurado"}
-    return ctx.actions.run_powershell(command=command, cwd=cwd)
+    if command or cwd:
+        return {
+            "ok": False,
+            "allowed": False,
+            "error": "PowerShell libre no esta expuesto a Gemini; usa operation/path/query estructurados.",
+        }
+    return ctx.actions.run_structured(
+        operation=operation or "",
+        path=path,
+        query=query,
+        max_chars=max_chars,
+        limit=limit,
+    )
 
 
 def jarvis_open_url(ctx: ToolContext, url: str | None = None) -> dict:
@@ -1359,8 +1429,8 @@ def jarvis_security_status(ctx: ToolContext) -> dict:
         "hitl": {
             "enabled": ctx.approvals is not None,
             "applies_to": [
-                "comandos PowerShell no-read-only",
-                "git push / git commit / instalaciones",
+                "abrir terminales",
+                "acciones sensibles no expuestas como operaciones read-only",
                 "operaciones MCP de escritura en Obsidian",
                 "borrado Obsidian cuando la env var lo permite",
             ],
@@ -1370,6 +1440,7 @@ def jarvis_security_status(ctx: ToolContext) -> dict:
             "actions_root": action_root,
             "obsidian_vault_root": vault_root,
             "path_validation": "Path.resolve() + relative_to(root)",
+            "command_interface": "operaciones read-only estructuradas; PowerShell libre no expuesto a Gemini",
         },
         "secret_filter": {
             "enabled": True,
@@ -1652,6 +1723,7 @@ class ToolDispatcher:
                 "message": spotify_control(**kw),
             },
             "obsidian_mcp": lambda **kw: obsidian_mcp(ctx, **kw),
+            "jarvis_proactive_check": lambda **kw: jarvis_proactive_check(ctx, **kw),
         }
         # Tools que tienen version async (devuelven coroutine awaitable).
         # El dispatcher async las invoca directamente sobre el event loop
