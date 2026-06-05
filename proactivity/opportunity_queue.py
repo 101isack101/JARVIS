@@ -122,6 +122,22 @@ class OpportunityQueue:
             return opp
         return None
 
+    def peek_top(self, k: int, *, now: datetime | None = None) -> list[Opportunity]:
+        """Top-k candidatos por score (respeta cooldown), SIN marcarlos ofrecidos.
+        Deduplica por id. Para el briefing de arranque."""
+        now = now or datetime.now()
+        ranked = sorted(self._candidates, key=lambda o: o.score, reverse=True)
+        out: list[Opportunity] = []
+        seen: set[str] = set()
+        for opp in ranked:
+            if opp.id in seen or self._in_cooldown(opp.id, now):
+                continue
+            seen.add(opp.id)
+            out.append(opp)
+            if len(out) >= max(0, k):
+                break
+        return out
+
     def mark_offered(self, opp_id: str) -> None:
         self._offered_this_session.add(opp_id)
         rec = self._history.setdefault(opp_id, {})
