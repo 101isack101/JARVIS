@@ -62,3 +62,43 @@ def test_build_briefing_failsafe_on_broken_vault(tmp_path):
             raise RuntimeError("boom")
 
     assert eng.build_briefing(Boom(), today=date(2026, 5, 30)) == ""
+
+
+def test_observe_then_next_opportunity_emits_struct(tmp_path):
+    vault = ObsidianVault(tmp_path, read_all=True)
+    _write_card(
+        vault, "Polymath IDE",
+        "# Polymath IDE - Memory Card\n\n## Pending\n\n- 2026-05-03 [high/high] conectar el agente\n",
+    )
+    cfg = ProactivityConfig(min_score=0.0)
+    eng = ProactivityEngine(config=cfg, state_path=tmp_path / "state.json")
+
+    eng.observe(vault, FakeRAG(), "sigamos con Polymath IDE")
+    struct = eng.next_opportunity()
+    assert struct is not None
+    assert struct["project"] == "Polymath IDE"
+    assert "what" in struct and "why_now" in struct
+
+
+def test_next_opportunity_none_when_no_candidates(tmp_path):
+    cfg = ProactivityConfig(min_score=0.0)
+    eng = ProactivityEngine(config=cfg, state_path=tmp_path / "state.json")
+    assert eng.next_opportunity() is None
+
+
+def test_dismiss_last_marks_cooldown(tmp_path):
+    vault = ObsidianVault(tmp_path, read_all=True)
+    _write_card(
+        vault, "Polymath IDE",
+        "# Polymath IDE - Memory Card\n\n## Pending\n\n- 2026-05-03 [high/high] conectar el agente\n",
+    )
+    cfg = ProactivityConfig(min_score=0.0, cooldown_days=7)
+    path = tmp_path / "state.json"
+    eng = ProactivityEngine(config=cfg, state_path=path)
+    eng.observe(vault, FakeRAG(), "Polymath IDE")
+    assert eng.next_opportunity() is not None
+    eng.dismiss_last()
+
+    eng2 = ProactivityEngine(config=cfg, state_path=path)
+    eng2.observe(vault, FakeRAG(), "Polymath IDE")
+    assert eng2.next_opportunity() is None
