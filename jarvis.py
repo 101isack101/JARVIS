@@ -56,6 +56,7 @@ from memory.session_summary import (
     build_recent_recall_block,
 )
 from memory.tools import ToolContext, ToolDispatcher, make_tool_object
+from overlay.ui_thread import UiThread
 from proactivity.config import ProactivityConfig
 from proactivity.engine import ProactivityEngine
 from mcp_obsidian.client import ObsidianMCPClient
@@ -136,6 +137,11 @@ class Jarvis:
         self._stopping = False
         self._input_transcript: list[str] = []
         self._output_transcript: list[str] = []
+        # Marshalling thread-safe hacia el thread del mainloop de tkinter.
+        # Cualquier thread (asyncio, workers de to_thread durante aprobaciones)
+        # encola en _ui_thread; un pump en el main thread lo drena. Evita que un
+        # worker toque Tcl y aborte el proceso (Tcl_AsyncDelete wrong thread).
+        self._ui_thread = UiThread()
 
         # Fase 1 — Continuidad entre sesiones.
         self.session_continuity_enabled = (
@@ -324,6 +330,10 @@ class Jarvis:
 
         # Overlay
         self.overlay = create_overlay(self.tracker, self.gate, on_close=self.stop)
+        # Arranca el pump de UI en el main thread: drena _ui_thread y se re-arma.
+        # El primer after() se registra aquí (build corre en el main thread), así
+        # que toda llamada Tcl posterior queda en el thread del mainloop.
+        self._install_ui_pump()
         for message, level in self._startup_notices:
             self.overlay.log_event(message, level)
         self.approvals.set_handler(
@@ -866,10 +876,32 @@ class Jarvis:
         else:
             log.info(msg)
 
+    _UI_POLL_MS = 16  # ~60fps: latencia imperceptible para updates de overlay
+
     def _tk(self, fn) -> None:
-        """Marshalla a main thread tkinter."""
+        """Marshalla a main thread tkinter de forma thread-safe.
+
+        Encola en _ui_thread (operación Python pura, sin Tcl) en vez de llamar
+        root.after() desde el thread llamante. El pump del main thread drena la
+        cola. Seguro desde cualquier thread, incl. workers de to_thread (que es
+        donde corre la aprobación HITL y antes abortaba el proceso)."""
         try:
-            self.overlay.root.after(0, fn)
+            self._ui_thread.submit(fn)
+        except Exception:
+            pass
+
+    def _install_ui_pump(self) -> None:
+        """Instala (desde el main thread) el pump que drena _ui_thread vía after."""
+        def _pump() -> None:
+            self._ui_thread.drain()
+            if self._stopping:
+                return
+            try:
+                self.overlay.root.after(self._UI_POLL_MS, _pump)
+            except Exception:
+                pass
+        try:
+            self.overlay.root.after(self._UI_POLL_MS, _pump)
         except Exception:
             pass
 
