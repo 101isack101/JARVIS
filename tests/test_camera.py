@@ -84,3 +84,18 @@ def test_camera_look_without_camera_reports_error():
     out = camera_look(ctx, reason="x")
     assert out["captured"] is False
     assert "error" in out
+
+
+def test_camera_look_during_watch_reports_clear_error(tmp_path):
+    from memory.tools import ToolContext, camera_look
+
+    class ActiveWatch:
+        def is_active(self):
+            return True
+
+    cam = CameraCapture(out_dir=tmp_path, index=0, device_factory=_factory())
+    ctx = ToolContext(vault=None, rag=None, camera=cam, camera_watch=ActiveWatch())
+    out = camera_look(ctx, reason="mira esto")
+    assert out["captured"] is False
+    assert out["active"] is True
+    assert "Modo vision activo" in out["error"]

@@ -76,3 +76,27 @@ def test_watch_blocked_by_budget(tmp_path):
     assert res["ok"] is False
     assert ctrl.is_active() is False
     assert sess.frames == []
+
+
+def test_camera_watch_tool_start_stop(tmp_path):
+    from memory.tools import ToolContext, camera_watch
+
+    ctrl, cam, sess, events = _make_controller(tmp_path)
+    ctx = ToolContext(vault=None, rag=None, camera_watch=ctrl)
+    out = camera_watch(ctx, action="start", duration_s=10)
+    assert out["ok"] is True
+    assert out["active"] is True
+    out2 = camera_watch(ctx, action="stop")
+    assert out2["ok"] is True
+    assert out2["active"] is False
+    assert ctrl.is_active() is False
+
+
+def test_camera_watch_tool_without_controller():
+    from memory.tools import ToolContext, camera_watch
+
+    ctx = ToolContext(vault=None, rag=None, camera_watch=None)
+    out = camera_watch(ctx, action="start")
+    assert out["ok"] is False
+    assert out["active"] is False
+    assert "error" in out

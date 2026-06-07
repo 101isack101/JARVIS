@@ -1112,6 +1112,15 @@ def camera_look(ctx: ToolContext, reason: str = "") -> dict:
     """
     if ctx.camera is None:
         return {"captured": False, "error": "Camara no configurada."}
+    if ctx.camera_watch is not None and ctx.camera_watch.is_active():
+        return {
+            "captured": False,
+            "active": True,
+            "error": (
+                "Modo vision activo. Di 'ya' o usa camera_watch(action='stop') "
+                "antes de tomar una foto con camera_look."
+            ),
+        }
     try:
         frame = ctx.camera.capture()
     except Exception as exc:

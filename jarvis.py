@@ -594,10 +594,10 @@ class Jarvis:
         )
 
     def _apply_focus_box(self, box_2d, label: str) -> None:
-        from vision.detect import box_to_pixels
-        size = int(os.environ.get("JARVIS_CAMERA_PREVIEW_SIZE", "480"))
-        px = box_to_pixels(box_2d, width=size, height=size, ox=0, oy=0)
-        self.overlay.set_camera_focus(px, label)
+        # box_2d viene normalizado 0..1000; el preview lo convierte a px usando la
+        # geometria real de la imagen (letterbox), asi queda alineado en cualquier
+        # aspect ratio. No convertir aqui.
+        self.overlay.set_camera_focus(box_2d, label)
 
     def _on_obs_memory_job_done(self, job: dict) -> None:
         title = job.get("title") or "OBS"
