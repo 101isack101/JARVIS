@@ -100,6 +100,9 @@ class JarvisOverlay:
         self.root.configure(bg=BG)
         self.root.geometry(f"{EXPANDED_SIZE}+80+80")
 
+        from overlay.camera_preview import CameraPreviewWindow
+        self._camera_preview = CameraPreviewWindow(self.root)
+
         self._logo_image: tk.PhotoImage | None = None
         self._load_brand_assets()
 
@@ -1015,6 +1018,23 @@ class JarvisOverlay:
 
     def _privacy_label_color(self) -> str:
         return OK if self._privacy_enabled() else WARN
+
+    # ---- Camera preview ----
+
+    def set_camera_active(self, active: bool) -> None:
+        """Muestra/oculta el preview e indica visualmente que la camara esta ON."""
+        if active:
+            self._camera_preview.show()
+            self.log_event("CAMARA ACTIVA (modo vision)", "warn")
+        else:
+            self._camera_preview.hide()
+            self.log_event("Camara apagada", "ok")
+
+    def update_camera_preview(self, frame) -> None:
+        self._camera_preview.update_frame(frame.jpeg_bytes)
+
+    def set_camera_focus(self, box_px, label: str = "") -> None:
+        self._camera_preview.set_focus_box(box_px, label)
 
     # ---- Lifecycle ----
 

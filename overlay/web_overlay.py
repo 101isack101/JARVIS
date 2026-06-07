@@ -228,6 +228,9 @@ class WebJarvisOverlay:
         self.root.withdraw()
         self.root.title(f"JARVIS {JARVIS_VERSION_LABEL} Web UI")
 
+        from overlay.camera_preview import CameraPreviewWindow
+        self._camera_preview = CameraPreviewWindow(self.root)
+
         self._server = self._start_server()
         self.url = f"http://{self._server.server_address[0]}:{self._server.server_address[1]}/"
         self._server_thread = threading.Thread(
@@ -478,6 +481,23 @@ class WebJarvisOverlay:
             self.root.after(0, self.open_dashboard)
             return True
         return False
+
+    # ---- Camera preview ----
+
+    def set_camera_active(self, active: bool) -> None:
+        """Muestra/oculta el preview e indica visualmente que la camara esta ON."""
+        if active:
+            self._camera_preview.show()
+            self.log_event("CAMARA ACTIVA (modo vision)", "warn")
+        else:
+            self._camera_preview.hide()
+            self.log_event("Camara apagada", "ok")
+
+    def update_camera_preview(self, frame) -> None:
+        self._camera_preview.update_frame(frame.jpeg_bytes)
+
+    def set_camera_focus(self, box_px, label: str = "") -> None:
+        self._camera_preview.set_focus_box(box_px, label)
 
     def toggle_compact(self) -> None:
         self.emit("toggleCompact")
