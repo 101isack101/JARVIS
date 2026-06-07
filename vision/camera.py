@@ -106,6 +106,9 @@ class CameraCapture:
     # ---- Watch: open once / read N / close ----
 
     def open(self) -> None:
+        # Path de arranque del modo vision: lo llama UN solo thread (el controller)
+        # una vez. El warmup corre bajo el lock; aceptable porque es startup y no
+        # compite con read_frame/close hasta que open() retorna.
         with self._lock:
             if self._device is not None:
                 return
@@ -144,6 +147,9 @@ class CameraCapture:
             dev.read()
 
     def _finalize(self, frame_bgr: np.ndarray, prefix: str) -> CameraFrame:
+        # Siempre invocado bajo self._lock (desde capture/read_frame), por eso
+        # la escritura de self._last aqui es segura. La property `last` lo lee sin
+        # lock: bajo el GIL la asignacion de atributo es atomica (no crash).
         self.cleanup_old()
         # cv2 entrega BGR; PIL espera RGB.
         frame_rgb = frame_bgr[:, :, ::-1]
