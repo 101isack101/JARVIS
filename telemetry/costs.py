@@ -68,6 +68,9 @@ PRICING: dict[str, ModelPricing] = {
     # Fallback estable
     "gemini-2.5-flash-native-audio-latest:audio-in": ModelPricing(input=0.075, output=0.0),
     "gemini-2.5-flash-native-audio-latest:audio-out": ModelPricing(input=0.0, output=0.30),
+    # Deteccion one-shot para crosshair (camera_focus). generate_content, no Live.
+    "gemini-3.1-flash:vision-in": ModelPricing(input=0.15, output=0.0),
+    "gemini-3.1-flash:text-out": ModelPricing(input=0.0, output=0.40),
 }
 
 
