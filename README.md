@@ -4,7 +4,7 @@ Asistente estilo Gemini Live con voz bidireccional, visión de pantalla, compute
 
 > **Status:** Copiloto local funcional. Voz bidireccional, overlay, hotkeys, memoria RAG, Claude tool, vision/screen capture, action executor seguro, modos, telemetry y budgets ya existen.
 
-> **Version actual:** v1.00
+> **Version actual:** v1.02
 
 ---
 

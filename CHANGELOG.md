@@ -2,6 +2,15 @@
 
 Todas las versiones relevantes de JARVIS se documentan aqui.
 
+## v1.02 - Vision por camara
+
+Fecha: 2026-06-07
+
+- Camara on-demand con `camera_look` y hotkey `Ctrl+Shift+C`.
+- Modo vision continuo con `camera_watch`, preview live y auto-stop.
+- Crosshair semantico con `camera_focus`.
+- FPS del modo vision configurado a 3.0 para mejor fluidez.
+
 ## v1.00 - Baseline UI/UX
 
 Fecha: 2026-05-31
