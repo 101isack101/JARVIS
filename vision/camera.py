@@ -179,3 +179,101 @@ class CameraCapture:
             except OSError:
                 continue
         return removed
+
+
+class CameraWatchController:
+    """Modo vision continuo acotado. Abre la camara, streamea frames a `fps`
+    por session.send_video_frame() y se apaga solo por timeout/stop/budget.
+
+    Threading: el loop corre en un hilo daemon propio. Nunca toca tkinter:
+    notifica al exterior via callbacks (on_state, on_frame) que el consumidor
+    (jarvis.py) marshalla con _tk().
+    """
+
+    def __init__(
+        self,
+        camera: "CameraCapture",
+        session: Any,
+        on_state: Callable[[bool], None] = lambda _a: None,
+        on_frame: Callable[[Any], None] = lambda _f: None,
+        gate_check: Callable[[], bool] = lambda: True,
+        on_log: Callable[[str], None] = lambda _m: None,
+        default_s: float | None = None,
+        max_s: float | None = None,
+    ) -> None:
+        self.camera = camera
+        self.session = session
+        self.on_state = on_state
+        self.on_frame = on_frame
+        self.gate_check = gate_check
+        self.on_log = on_log
+        self.default_s = float(os.environ.get("JARVIS_CAMERA_WATCH_DEFAULT_S", "90")) if default_s is None else float(default_s)
+        self.max_s = float(os.environ.get("JARVIS_CAMERA_WATCH_MAX_S", "180")) if max_s is None else float(max_s)
+        self._thread: threading.Thread | None = None
+        self._stop = threading.Event()
+        self._active = False
+        self._lock = threading.Lock()
+
+    def is_active(self) -> bool:
+        return self._active
+
+    def start(self, duration_s: float | None = None) -> dict:
+        with self._lock:
+            if self._active:
+                return {"ok": True, "active": True, "note": "modo vision ya activo"}
+            if not self.gate_check():
+                return {"ok": False, "active": False, "error": "presupuesto Gemini agotado"}
+            dur = self.default_s if not duration_s else float(duration_s)
+            dur = max(0.1, min(dur, self.max_s))
+            try:
+                self.camera.open()
+            except Exception as exc:
+                return {"ok": False, "active": False, "error": f"{type(exc).__name__}: {exc}"}
+            self._stop.clear()
+            self._active = True
+            self._thread = threading.Thread(
+                target=self._loop, args=(dur,), name="JarvisCameraWatch", daemon=True
+            )
+            self._thread.start()
+        self.on_state(True)
+        self.on_log(f"[WATCH] modo vision ON ({dur:.0f}s)")
+        return {"ok": True, "active": True, "duration_s": dur}
+
+    def stop(self) -> dict:
+        self._stop.set()
+        t = self._thread
+        if t is not None:
+            t.join(timeout=3.0)
+        self._teardown()
+        return {"ok": True, "active": False}
+
+    def _loop(self, duration_s: float) -> None:
+        period = 1.0 / max(0.1, self.camera.fps)
+        deadline = time.time() + duration_s
+        try:
+            while not self._stop.is_set() and time.time() < deadline:
+                if not self.gate_check():
+                    self.on_log("[WATCH] stop: presupuesto agotado")
+                    break
+                try:
+                    frame = self.camera.read_frame()
+                    self.session.send_video_frame(frame.jpeg_bytes)
+                    self.on_frame(frame)
+                except Exception as exc:
+                    self.on_log(f"[WATCH] frame error: {type(exc).__name__}: {exc}")
+                self._stop.wait(period)
+        finally:
+            self._teardown()
+
+    def _teardown(self) -> None:
+        with self._lock:
+            if not self._active:
+                return
+            self._active = False
+            self._thread = None
+        try:
+            self.camera.close()
+        except Exception:
+            pass
+        self.on_state(False)
+        self.on_log("[WATCH] modo vision OFF")
