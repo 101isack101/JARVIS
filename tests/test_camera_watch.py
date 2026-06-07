@@ -1,8 +1,31 @@
+import asyncio
 import time
 from pathlib import Path
 
+from gemini.session import JarvisSession, SessionConfig, SessionCallbacks
 from vision.camera import CameraCapture, CameraWatchController
 from tests.test_camera import _factory
+
+
+class FakeLiveSession:
+    def __init__(self):
+        self.video_blobs = []
+
+    async def send_realtime_input(self, **kwargs):
+        if "video" in kwargs:
+            self.video_blobs.append(kwargs["video"])
+
+
+def test_async_send_video_builds_jpeg_blob():
+    cfg = SessionConfig(api_key="x")
+    sess = JarvisSession(cfg, SessionCallbacks())
+    fake = FakeLiveSession()
+    sess._session = fake
+    asyncio.run(sess._async_send_video(b"\xff\xd8\xff_fake_jpeg"))
+    assert len(fake.video_blobs) == 1
+    blob = fake.video_blobs[0]
+    assert blob.mime_type == "image/jpeg"
+    assert blob.data == b"\xff\xd8\xff_fake_jpeg"
 
 
 class FakeSession:

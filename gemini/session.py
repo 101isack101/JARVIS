@@ -667,6 +667,22 @@ class JarvisSession:
         except Exception as exc:
             self.cb.on_error(exc)
 
+    def send_video_frame(self, jpeg_bytes: bytes) -> None:
+        """Envia un frame de video (JPEG) por el canal realtime (modo vision)."""
+        if not jpeg_bytes:
+            return
+        self._submit(self._async_send_video(jpeg_bytes))
+
+    async def _async_send_video(self, jpeg_bytes: bytes) -> None:
+        if self._session is None:
+            return
+        try:
+            await self._session.send_realtime_input(
+                video=types.Blob(data=jpeg_bytes, mime_type="image/jpeg")
+            )
+        except Exception as exc:
+            self.cb.on_error(exc)
+
     def start_user_activity(self) -> None:
         """En modo manual (PTT), marca inicio del turno del usuario."""
         if not self.config.manual_activity_mode:
