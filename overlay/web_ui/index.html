@@ -1,0 +1,230 @@
+<!DOCTYPE html>
+<html lang="es" data-theme="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>JARVIS v1.00 - Local Neural Interface</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&family=Space+Grotesk:wght@500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="./styles.css">
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          fontFamily: {
+            display: ['Space Grotesk', 'Inter', 'sans-serif'],
+            sans: ['Inter', 'sans-serif'],
+            mono: ['JetBrains Mono', 'monospace']
+          },
+          colors: {
+            void: '#020509',
+            glass: '#07131d',
+            cyanCore: '#67e8f9',
+            tealCore: '#2dd4bf',
+            warningCore: '#fbbf24',
+            dangerCore: '#ef4444'
+          },
+          boxShadow: {
+            neon: '0 0 26px rgba(169, 247, 255, 0.16)',
+            neonStrong: '0 0 48px rgba(169, 247, 255, 0.22)',
+            panel: '0 24px 70px rgba(0, 0, 0, 0.48)'
+          }
+        }
+      }
+    };
+  </script>
+</head>
+<body class="min-h-screen overflow-hidden bg-void text-cyan-100 font-sans antialiased">
+  <div class="fixed inset-0 cyber-grid opacity-80"></div>
+  <div class="fixed inset-0 vignette"></div>
+
+  <main class="relative z-10 flex h-screen">
+    <aside class="glass-panel flex w-[315px] shrink-0 flex-col border-r border-cyan-300/15 px-5 py-5 shadow-panel">
+      <header class="mb-7 flex items-center gap-4">
+        <div class="brand-mark relative grid h-12 w-12 place-items-center overflow-hidden rounded-2xl border border-cyan-300/40 bg-cyan-300/10 shadow-neon">
+          <span class="font-display text-xl font-bold text-cyan-100">J</span>
+        </div>
+        <div>
+          <h1 class="font-display text-2xl font-bold tracking-[0.16em] text-white text-cyan-glow">JARVIS</h1>
+          <p id="versionLabel" class="mt-1 text-[10px] uppercase tracking-[0.18em] text-cyan-300/70">Local Neural Interface v1.00</p>
+        </div>
+      </header>
+
+      <section class="space-y-4">
+        <article class="glass-card p-4">
+          <div class="mb-3 flex items-center justify-between">
+            <p class="hud-label">Estado</p>
+            <span id="modePill" class="soft-pill">Modo PTT</span>
+          </div>
+          <div class="flex items-center gap-3">
+            <span id="stateDot" class="status-dot bg-cyan-300"></span>
+            <div>
+              <p id="stateLabel" class="font-display text-sm font-semibold tracking-[0.10em] text-white">LISTO</p>
+              <p id="stateDetail" class="mt-1 text-xs text-cyan-200/60">Mantener Ctrl para hablar</p>
+            </div>
+          </div>
+        </article>
+
+        <article class="glass-card p-4">
+          <p class="hud-label mb-3">Conexion</p>
+          <div class="space-y-3 text-xs">
+            <div class="flex items-center justify-between">
+              <span class="text-cyan-100/60">Gemini Live</span>
+              <span id="connectionStatus" class="text-amber-300">Conectando</span>
+            </div>
+            <div class="h-1.5 overflow-hidden rounded-full bg-cyan-950/80">
+              <div id="connectionBar" class="h-full w-[44%] rounded-full bg-gradient-to-r from-cyan-300 to-teal-300 shadow-neon"></div>
+            </div>
+          </div>
+        </article>
+
+        <article class="glass-card p-4">
+          <p class="hud-label mb-3">Memoria</p>
+          <div class="grid grid-cols-3 gap-2 text-center">
+            <div class="metric-tile">
+              <span id="memoryOk" class="metric-value">0</span>
+              <span class="metric-label">OK</span>
+            </div>
+            <div class="metric-tile">
+              <span id="memoryActive" class="metric-value">0</span>
+              <span class="metric-label">Activa</span>
+            </div>
+            <div class="metric-tile">
+              <span id="memoryErr" class="metric-value">0</span>
+              <span class="metric-label">Error</span>
+            </div>
+          </div>
+        </article>
+      </section>
+
+      <nav class="mt-6 space-y-2">
+        <button class="nav-button active" data-tab="overview">Command Center</button>
+        <button class="nav-button" data-tab="memory">Memoria</button>
+        <button class="nav-button" data-tab="events">Eventos</button>
+        <button class="nav-button" data-tab="logs">Logs</button>
+      </nav>
+
+      <footer class="mt-auto space-y-3">
+        <div class="glass-card p-4">
+          <p class="hud-label mb-3">Budget</p>
+          <div class="space-y-3">
+            <div>
+              <div class="mb-1 flex justify-between text-[11px] text-cyan-100/60"><span>Gemini</span><span id="geminiBudget">$0.000/$2.00</span></div>
+              <div class="budget-track"><div id="geminiBudgetFill" class="budget-fill w-[0%]"></div></div>
+            </div>
+            <div>
+              <div class="mb-1 flex justify-between text-[11px] text-cyan-100/60"><span>Claude</span><span id="claudeBudget">$0.000/$1.00</span></div>
+              <div class="budget-track"><div id="claudeBudgetFill" class="budget-fill w-[0%]"></div></div>
+            </div>
+          </div>
+        </div>
+      </footer>
+    </aside>
+
+    <section class="relative flex min-w-0 flex-1 flex-col">
+      <header class="flex h-20 items-center justify-between border-b border-cyan-300/10 px-8">
+        <div>
+          <p class="hud-label">Runtime Surface</p>
+          <h2 class="mt-1 font-display text-xl font-semibold tracking-[0.14em] text-white">NEURAL CORE</h2>
+        </div>
+        <div class="flex items-center gap-3">
+          <span id="privacyPill" class="soft-pill text-amber-200">Captura visible</span>
+          <button id="compactBtn" class="icon-button" title="Modo compacto">MIN</button>
+          <button id="centerBtn" class="icon-button" title="Command Center">CENTER</button>
+          <button id="closeBtn" class="icon-button danger-button" title="Cerrar Jarvis">SALIR</button>
+        </div>
+      </header>
+
+      <div class="grid flex-1 grid-cols-[1fr_360px] gap-6 overflow-hidden p-6">
+        <section class="relative flex min-h-0 flex-col items-center justify-center overflow-hidden rounded-xl border border-cyan-300/10 bg-black/20">
+          <div class="absolute inset-0 neural-backdrop"></div>
+          <div class="relative z-10 flex flex-col items-center">
+            <div id="coreStateLabel" class="mb-8 font-display text-xs uppercase tracking-[0.28em] text-cyan-200/70">Awaiting signal</div>
+
+            <div id="neuralCore" class="neural-core state-idle relative grid place-items-center rounded-full">
+              <div class="core-ring core-ring-1"></div>
+              <div class="core-ring core-ring-2"></div>
+              <div class="core-ring core-ring-3"></div>
+              <div class="core-orbit orbit-a"></div>
+              <div class="core-orbit orbit-b"></div>
+              <div class="particle-field" aria-hidden="true"></div>
+              <div class="central-core">
+                <div class="central-void">
+                  <span class="font-display text-3xl text-cyan-100 text-cyan-glow">J</span>
+                </div>
+              </div>
+            </div>
+
+            <div id="voiceWave" class="voice-wave mt-10" aria-hidden="true"></div>
+
+            <div class="mt-10 glass-strip flex items-center gap-8 rounded-full px-8 py-4 text-xs text-cyan-100/75">
+              <div><span id="clock">--:--</span> <span class="text-cyan-300">Memoria activa</span></div>
+              <div>Gemini Live <span class="text-emerald-300">&bull;</span></div>
+              <div id="activityInline" class="text-cyan-300/80">Overlay listo</div>
+            </div>
+          </div>
+        </section>
+
+        <aside class="flex min-h-0 flex-col gap-5">
+          <section class="glass-panel flex min-h-0 flex-1 flex-col rounded-xl p-5">
+            <div class="mb-4 flex items-center justify-between">
+              <div>
+                <p class="hud-label">Conversation</p>
+                <h3 class="font-display text-sm font-semibold tracking-[0.12em] text-white">CHAT STREAM</h3>
+              </div>
+              <div class="flex gap-2">
+                <button id="copyBtn" class="mini-button">Copiar</button>
+                <button id="clearBtn" class="mini-button">Limpiar</button>
+              </div>
+            </div>
+
+            <div class="space-y-4 overflow-hidden">
+              <div>
+                <p class="mb-2 text-[10px] uppercase tracking-[0.26em] text-cyan-200/45">Tu</p>
+                <div id="inputTranscript" class="transcript-box h-20"></div>
+              </div>
+              <div>
+                <p class="mb-2 text-[10px] uppercase tracking-[0.26em] text-cyan-300">JARVIS</p>
+                <div id="outputTranscript" class="transcript-box h-64 text-cyan-100"></div>
+              </div>
+            </div>
+          </section>
+
+          <section class="glass-panel rounded-xl p-5">
+            <div class="mb-4 flex items-center justify-between">
+              <div>
+                <p class="hud-label">Live Feed</p>
+                <h3 class="font-display text-sm font-semibold tracking-[0.12em] text-white">EVENTOS</h3>
+              </div>
+              <span id="eventCount" class="soft-pill">0</span>
+            </div>
+            <div id="eventFeed" class="space-y-3 text-xs text-cyan-100/70">
+              <div class="event-line">--:-- Inicializando superficie local</div>
+            </div>
+          </section>
+        </aside>
+      </div>
+    </section>
+  </main>
+
+  <div id="approvalModal" class="pointer-events-none fixed inset-0 z-50 hidden items-center justify-center bg-black/60 opacity-0 backdrop-blur-xl transition duration-300">
+    <section class="glass-panel w-[640px] rounded-xl p-6 shadow-neonStrong">
+      <p class="hud-label text-red-300">Security Gate</p>
+      <h2 id="approvalTitle" class="mt-2 font-display text-2xl font-bold tracking-[0.08em] text-white">Aprobacion requerida</h2>
+      <div class="mt-4 flex items-center justify-between">
+        <span id="approvalRisk" class="soft-pill border-red-300/30 bg-red-500/10 text-red-200">Riesgo: destructive</span>
+        <span id="approvalCountdown" class="text-xs text-cyan-100/50">Auto-rechazo en 30s</span>
+      </div>
+      <pre id="approvalDetails" class="mt-5 max-h-52 overflow-auto rounded-2xl border border-cyan-300/10 bg-black/45 p-4 text-xs leading-6 text-cyan-100/75">Demo visual: esta aprobacion simula una accion sensible.</pre>
+      <div class="mt-6 flex justify-end gap-3">
+        <button id="rejectApproval" class="mini-button px-5 py-3">Rechazar</button>
+        <button id="approveApproval" class="premium-button px-5 py-3">Aprobar accion</button>
+      </div>
+    </section>
+  </div>
+
+  <script src="./app.js"></script>
+</body>
+</html>

@@ -1,7 +1,7 @@
 import asyncio
 from types import SimpleNamespace
 
-from gemini.session import JarvisSession, SessionCallbacks, SessionConfig
+from gemini.session import JarvisSession, SessionCallbacks, SessionConfig, _call_compatible
 
 
 def _turn_complete_response():
@@ -101,3 +101,21 @@ def test_submit_closes_coroutine_when_loop_not_ready():
     session._submit(coro)
 
     assert coro.cr_frame is None
+
+
+def test_tool_callbacks_remain_backward_compatible():
+    calls = []
+
+    def old_start(name):
+        calls.append(("start", name))
+
+    def old_end(name, elapsed_ms, ok):
+        calls.append(("end", name, elapsed_ms, ok))
+
+    _call_compatible(old_start, "jarvis_recall", {"query": "secret-ish content"})
+    _call_compatible(old_end, "jarvis_recall", 12.5, True, {"found": 2})
+
+    assert calls == [
+        ("start", "jarvis_recall"),
+        ("end", "jarvis_recall", 12.5, True),
+    ]

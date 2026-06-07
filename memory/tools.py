@@ -48,6 +48,7 @@ class ToolContext:
 
     vault: ObsidianVault
     rag: VaultRAG
+    semantic_memory: Any | None = None
     reasoner: Any | None = None
     tracker: Any | None = None
     gate: Any | None = None
@@ -702,10 +703,20 @@ def make_tool_object() -> types.Tool:
 # =====================================================================
 
 def jarvis_recall(ctx: ToolContext, query: str, top_k: int = 3) -> dict:
-    top_k = max(1, min(int(top_k or 3), 5))
-    results = ctx.rag.search(query, top_k=top_k)
+    top_k = max(1, min(int(top_k or 3), int(os.environ.get("JARVIS_SEMANTIC_MAX_RESULTS", "8"))))
+    backend = "semantic" if ctx.semantic_memory is not None else "rag"
+    try:
+        results = (
+            ctx.semantic_memory.search(query, top_k=top_k)
+            if ctx.semantic_memory is not None
+            else ctx.rag.search(query, top_k=min(top_k, 5))
+        )
+    except Exception:
+        backend = "rag"
+        results = ctx.rag.search(query, top_k=min(top_k, 5))
     return {
         "query": query,
+        "backend": backend,
         "found": len(results),
         "results": [
             _recall_result_dict(ctx, r)
@@ -751,6 +762,13 @@ def _recall_result_dict(ctx: ToolContext, result) -> dict:
         "score": round(result.score, 3),
         "snippet": chunk.text[:400],
     }
+    for key in ("source_type", "source_uri", "date", "project", "confidence"):
+        value = getattr(chunk, key, None)
+        if value:
+            out[key] = value
+    tags = getattr(chunk, "tags", None)
+    if tags:
+        out["tags"] = tags
     out.update(_note_memory_metadata(ctx, chunk.rel_path))
     return out
 
@@ -942,7 +960,7 @@ def _merge_context(model_ctx: str | None, auto_ctx: str) -> str | None:
 
 def _augmented_context(ctx: ToolContext, prompt: str, context_extra: str | None) -> str | None:
     try:
-        auto = build_project_context(ctx.vault, ctx.rag, prompt)
+        auto = build_project_context(ctx.vault, ctx.rag, prompt, semantic_memory=ctx.semantic_memory)
     except Exception:
         return context_extra  # fail-safe: nunca rompe el razonamiento
     return _merge_context(context_extra, auto.text)

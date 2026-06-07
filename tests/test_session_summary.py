@@ -13,6 +13,9 @@ from memory.obsidian_vault import ObsidianVault
 from memory.session_journal import SessionJournal
 from memory.session_summary import (
     SESSIONS_SUBDIR,
+    build_recent_recall_block,
+    load_recent_summaries,
+    search_session_summaries,
     synthesize_and_save,
     load_last_summary,
 )
@@ -124,6 +127,82 @@ def test_load_last_summary_picks_most_recent(temp_vault):
     assert "viejo" not in out
 
 
+def test_load_recent_summaries_returns_compact_session_map(temp_vault):
+    base = temp_vault.memory_path / SESSIONS_SUBDIR
+    base.mkdir(parents=True, exist_ok=True)
+    for name, marker in [
+        ("2026-05-29_1000_sesion.md", "viejo"),
+        ("2026-05-30_1100_sesion.md", "ayer"),
+        ("2026-05-31_1200_sesion.md", "hoy"),
+    ]:
+        (base / name).write_text(
+            "---\ntype: session-journal\n---\n\n# S\n\n"
+            f"## Resumen\n- {marker}\n\n## Pendientes\n- revisar {marker}\n",
+            encoding="utf-8",
+        )
+
+    recent = load_recent_summaries(temp_vault, limit=2, max_chars_each=300)
+    block = build_recent_recall_block(recent)
+
+    assert [item["date"] for item in recent] == ["2026-05-31", "2026-05-30"]
+    assert "MAPA DE SESIONES RECIENTES" in block
+    assert "hoy" in block
+    assert "ayer" in block
+    assert "viejo" not in block
+
+
+def test_search_session_summaries_understands_ayer(temp_vault):
+    from datetime import date
+
+    base = temp_vault.memory_path / SESSIONS_SUBDIR
+    base.mkdir(parents=True, exist_ok=True)
+    (base / "2026-05-30_2326_sesion.md").write_text(
+        "---\ntype: session-journal\n---\n\n# S\n\n"
+        "## Resumen\n- Hablamos de la UI de Jarvis y el nucleo neural.\n\n"
+        "## Pendientes\n- Integrar el bridge web.\n",
+        encoding="utf-8",
+    )
+    (base / "2026-05-31_1956_sesion.md").write_text(
+        "---\ntype: session-journal\n---\n\n# S\n\n"
+        "## Resumen\n- Revisamos memoria temporal.\n\n## Pendientes\n- Ninguno.\n",
+        encoding="utf-8",
+    )
+
+    result = search_session_summaries(
+        temp_vault,
+        query="UI Jarvis",
+        when="ayer",
+        today=date(2026, 5, 31),
+    )
+
+    assert result["target_date"] == "2026-05-30"
+    assert result["found"] == 1
+    assert "nucleo neural" in result["sessions"][0]["summary"]
+
+
+def test_search_session_summaries_falls_back_to_date_when_terms_miss(temp_vault):
+    from datetime import date
+
+    base = temp_vault.memory_path / SESSIONS_SUBDIR
+    base.mkdir(parents=True, exist_ok=True)
+    (base / "2026-05-30_2100_sesion.md").write_text(
+        "---\ntype: session-journal\n---\n\n# S\n\n"
+        "## Resumen\n- Revisamos decisiones generales.\n\n"
+        "## Pendientes\n- Ninguno.\n",
+        encoding="utf-8",
+    )
+
+    result = search_session_summaries(
+        temp_vault,
+        query="tema que no aparece",
+        when="ayer",
+        today=date(2026, 5, 31),
+    )
+
+    assert result["found"] == 1
+    assert result["sessions"][0]["date"] == "2026-05-30"
+
+
 def test_load_last_summary_returns_none_when_empty(temp_vault):
     assert load_last_summary(temp_vault, max_chars=1000) is None
 
@@ -187,7 +266,7 @@ def test_build_recall_block_wraps_with_header():
     from memory.session_summary import build_recall_block
 
     block = build_recall_block("## Resumen\n- algo\n\n## Pendientes\n- retomar X")
-    assert "CONTEXTO DE SESIÓN ANTERIOR" in block
+    assert "CONTEXTO DE SESION ANTERIOR" in block
     assert "retomar X" in block
 
 

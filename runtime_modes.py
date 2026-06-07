@@ -12,6 +12,7 @@ MODES = {
     "meeting": "Prioriza escucha, resumen, decisiones y tareas pendientes.",
     "planning": "Prioriza pasos, riesgos, dependencias y memoria durable.",
     "study": "Observa lecturas/cursos, captura evidencia y construye notas en Obsidian.",
+    "english": "Practica conversacion en ingles, corrige errores y entrena fluidez.",
 }
 
 

@@ -12,9 +12,9 @@
 $ErrorActionPreference = 'Stop'
 
 # Rutas absolutas (Jarvis siempre vive aqui en la maquina de Isaac).
-$JarvisDir = "C:\Users\Isaac\Desktop\PROYECTOS\Jarvis"
+$JarvisDir = "C:\Users\Isaac\Desktop\PROYECTOS\JARVIS"
 $BatFile  = Join-Path $JarvisDir "jarvis_run.bat"
-$IcoFile  = Join-Path $JarvisDir "assets\icon.ico"
+$IcoFile  = Join-Path $JarvisDir "assets\icon_elegant.ico"
 $LnkPath  = Join-Path ([Environment]::GetFolderPath('Desktop')) "JARVIS.lnk"
 
 # Verifica que los archivos fuente existan antes de tocar el shortcut.

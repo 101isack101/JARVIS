@@ -20,8 +20,9 @@ def test_drain_executes_in_fifo_order():
     ui = UiThread()
     ui.submit(lambda: out.append("a"))
     ui.submit(lambda: out.append("b"))
-    ui.drain()
+    drained = ui.drain()
     assert out == ["a", "b"]
+    assert drained == 2
     assert ui.pending() == 0
 
 
@@ -53,3 +54,52 @@ def test_submit_none_is_ignored():
     ui = UiThread()
     ui.submit(None)
     assert ui.pending() == 0
+
+
+def test_submit_latest_coalesces_same_key():
+    out = []
+    ui = UiThread()
+    ui.submit_latest("audio", lambda: out.append("old"))
+    ui.submit_latest("audio", lambda: out.append("new"))
+
+    assert ui.pending() == 1
+    ui.drain()
+
+    assert out == ["new"]
+
+
+def test_drain_can_limit_callbacks_per_pump():
+    out = []
+    ui = UiThread()
+    ui.submit(lambda: out.append(1))
+    ui.submit(lambda: out.append(2))
+
+    drained = ui.drain(max_callbacks=1)
+
+    assert out == [1]
+    assert drained == 1
+    assert ui.pending() == 1
+
+
+def test_submit_latest_recovers_when_queue_was_full():
+    out = []
+    ui = UiThread(max_pending=1)
+    ui.submit(lambda: out.append("fills queue"))
+
+    ui.submit_latest("audio", lambda: out.append("dropped"))
+    ui.drain()
+    ui.submit_latest("audio", lambda: out.append("accepted"))
+    ui.drain()
+
+    assert out == ["fills queue", "accepted"]
+
+
+def test_submit_force_discards_old_work_when_queue_is_full():
+    out = []
+    ui = UiThread(max_pending=1)
+    ui.submit(lambda: out.append("old"))
+
+    ui.submit_force(lambda: out.append("critical"))
+    ui.drain()
+
+    assert out == ["critical"]

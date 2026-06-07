@@ -4,16 +4,19 @@ Asistente estilo Gemini Live con voz bidireccional, visión de pantalla, compute
 
 > **Status:** Copiloto local funcional. Voz bidireccional, overlay, hotkeys, memoria RAG, Claude tool, vision/screen capture, action executor seguro, modos, telemetry y budgets ya existen.
 
+> **Version actual:** v1.00
+
 ---
 
 ## Arquitectura corta
 
 - **Gemini Live** (`google-genai`): voz speech-to-speech nativo, barge-in, vision
 - **Claude 4.6 Sonnet** (`anthropic`): tool `ask_claude_deep` para razonamiento profundo
-- **Overlay tkinter**: invisible a Zoom/Teams via `WDA_EXCLUDEFROMCAPTURE`
+- **Overlay tkinter**: interfaz principal, invisible a Zoom/Teams via `WDA_EXCLUDEFROMCAPTURE`
 - **Vision**: `Ctrl+Shift+S`, `Ctrl+Alt+S` y tool `screen_look` capturan pantalla/region para Gemini
-- **Computer use seguro**: `actions/` con allowlist read-only, dry-run en `JARVIS_MODE=dev`
+- **Computer use seguro**: `actions/` con operaciones read-only estructuradas y validacion de rutas
 - **Obsidian MCP**: `mcp_obsidian/` expone operaciones seguras para editar, mover y organizar notas/carpetas
+- **English Practice**: tool `english_practice` activa/desactiva practica conversacional de ingles con correcciones breves
 
 ---
 
@@ -86,11 +89,14 @@ Ejecutar los dos spikes en orden. Ambos deberían terminar en <30s.
 - **Hecho:** Telemetry con budget session/daily/weekly via SQLite
 - **Hecho:** Claude como tool callable desde Gemini
 - **Hecho:** Screen capture + vision por hotkey/tool
-- **Hecho:** Action executor read-only con allowlist
+- **Hecho:** Action executor read-only estructurado, sin shell libre expuesto a Gemini
 - **Hecho:** MCP local para Obsidian (`obsidian_mcp`) con crear/editar/mover/listar/linkear
 - **Hecho:** Reconexión limpia ante `go_away` de Gemini Live y estado visible de conexión en overlay
 - **Hecho:** Preferencias persistentes en `data/preferences.json` (notas granulares por tema; no forzar respuestas más cortas)
+- **Hecho:** Recall temporal de sesiones (`jarvis_session_recall`) para "ayer", "anoche" y conversaciones previas
 - **Hecho:** Retención automática de screenshots vía `JARVIS_SCREENSHOT_RETENTION_HOURS`
+- **Hecho:** English Practice Mode activable por voz con `english_practice`
+- **Hecho:** UI web premium v1.00 disponible como opcion con `JARVIS_UI=web`
 - **Pendiente:** Autopilot con confirmaciones y acciones de escritura controladas
 - **Pendiente:** Dashboard/log viewer para inspeccionar decisiones de Jarvis
 
@@ -98,8 +104,9 @@ Ejecutar los dos spikes en orden. Ambos deberían terminar en <30s.
 
 ## Seguridad operativa
 
-- **HITL:** comandos no-read-only y operaciones MCP de escritura piden aprobacion visual en tkinter. Sin broker/UI, fallan cerrado.
+- **HITL:** operaciones MCP de escritura y acciones sensibles piden aprobacion visual en la UI. Sin broker/UI, fallan cerrado.
 - **Sandbox de rutas:** `SafeActionExecutor` solo trabaja dentro del root permitido de Jarvis; rutas fuera se bloquean con `Path.resolve()` + `relative_to()`.
+- **Comandos:** Gemini solo ve operaciones estructuradas (`list_dir`, `read_file`, `search_text`, `git_status`, etc.); PowerShell libre no se expone como tool conversacional.
 - **Secretos:** RAG/indexer omiten paths sensibles (`.env`, `.pem`, keys, credenciales) y redactan patrones de API keys antes de indexar o responder.
 - **Logs:** tool arguments y mensajes largos se redactan/truncan antes de escribirse en `data/jarvis.log`.
 - **Screenshots:** las capturas en `data/screenshots` se limpian automáticamente según `JARVIS_SCREENSHOT_RETENTION_HOURS` (24h por defecto).
@@ -118,6 +125,25 @@ Ejecutar los dos spikes en orden. Ambos deberían terminar en <30s.
 | `Ctrl+Alt+S` | Capturar region seleccionada -> Gemini |
 | `Ctrl+Alt+P` | Pausar acciones (voz sigue) |
 | `Ctrl+Alt+Q` | **Kill-switch** — aborta todo y cierra |
+
+---
+
+## English Practice Mode
+
+Se activa por voz con frases como:
+
+- "Activa modo ingles"
+- "Vamos a practicar ingles"
+- "Hagamos una entrevista en ingles"
+- "Haz shadowing conmigo"
+
+Se desactiva con:
+
+- "Desactiva modo ingles"
+- "Termina practica de ingles"
+- "Volvamos a espanol"
+
+Internamente usa la tool `english_practice(action, level, focus, correction_style)` y cambia el runtime mode a `english`. Mientras esta activo, Jarvis conversa principalmente en ingles, mantiene el flujo y luego da feedback corto: correccion, version natural y una frase para repetir.
 
 ---
 
@@ -148,11 +174,11 @@ Normalmente no hay que correrlo a mano; Jarvis lo levanta como subproceso MCP.
 ```
 Jarvis/
 ├── jarvis.py                    # Entry point (Fase 1+)
-├── overlay/                    # tkinter UI
+├── overlay/                    # tkinter UI + web UI opcional
 ├── audio/                      # capture, playback, VAD
 ├── gemini/                     # GeminiLiveSession + tools + system prompt
 ├── claude/                     # ask_claude_deep wrapper
-├── actions/                    # Computer use con allowlist
+├── actions/                    # Computer use read-only estructurado
 ├── vision/                     # screen capture
 ├── mcp_obsidian/                # MCP stdio server/client para Obsidian
 ├── memory/                     # SQLite + FAISS RAG

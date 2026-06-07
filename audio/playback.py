@@ -26,6 +26,12 @@ GEMINI_OUTPUT_RATE = 24000  # Gemini Live siempre devuelve 24kHz mono int16
 BLOCKSIZE = 1024            # ~42ms @ 24kHz — balance latencia/CPU
 CHANNELS = 1
 DTYPE = "int16"
+# Bloques vacios consecutivos antes de declarar "playback completo". El jitter de
+# red entre chunks de Gemini vacia la cola momentaneamente; sin este grace, cada
+# hueco transitorio dispararia on_underflow -> en LIBRE eso reseteaba VAD/AEC y
+# parpadeaba speaking<->listening a mitad de frase. 3 bloques ~= 128ms: tolera el
+# jitter sin retrasar de forma perceptible la reapertura del mic al terminar.
+UNDERFLOW_GRACE_BLOCKS = 3
 
 
 class AudioPlayer:
@@ -39,12 +45,22 @@ class AudioPlayer:
         player.stop()            # cleanup
     """
 
-    def __init__(self, on_underflow: Callable[[], None] | None = None) -> None:
+    def __init__(
+        self,
+        on_underflow: Callable[[], None] | None = None,
+        on_playback: Callable[[bytes], None] | None = None,
+    ) -> None:
         self._queue: deque[np.ndarray] = deque()
         self._stream: sd.OutputStream | None = None
         self._on_underflow = on_underflow
+        # Callback con lo que REALMENTE sale al parlante (int16 24kHz). Es la
+        # referencia (far-end) para el AEC, tomada aqui —no al encolar— para que
+        # quede alineada en tiempo con lo que el mic captura como eco.
+        self._on_playback = on_playback
         self._lock = threading.Lock()
         self._playing = False
+        # Cuenta de callbacks consecutivos con la cola vacia (ver UNDERFLOW_GRACE_BLOCKS).
+        self._empty_streak = 0
 
     def _callback(self, outdata: np.ndarray, frames: int, _time_info, _status) -> None:
         """sounddevice llama esto desde su thread interno."""
@@ -52,9 +68,15 @@ class AudioPlayer:
             chunk = self._queue.popleft() if self._queue else None
         if chunk is None:
             outdata.fill(0)
-            if self._on_underflow and self._playing:
-                self._playing = False
-                self._on_underflow()
+            # Solo declaramos fin tras varios bloques vacios seguidos: un hueco
+            # transitorio por jitter de red NO es fin de turno (evita flapping).
+            if self._playing:
+                self._empty_streak += 1
+                if self._empty_streak >= UNDERFLOW_GRACE_BLOCKS:
+                    self._playing = False
+                    self._empty_streak = 0
+                    if self._on_underflow:
+                        self._on_underflow()
             return
 
         n = min(len(chunk), frames)
@@ -66,6 +88,14 @@ class AudioPlayer:
             with self._lock:
                 self._queue.appendleft(leftover)
         self._playing = True
+        self._empty_streak = 0
+        # Emitir la referencia (solo las muestras reales emitidas). Debe ser
+        # rapido: el consumidor (AEC) solo resamplea y encola.
+        if self._on_playback is not None:
+            try:
+                self._on_playback(outdata[:n, 0].tobytes())
+            except Exception:
+                pass
 
     def start(self) -> None:
         if self._stream is not None:

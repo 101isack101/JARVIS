@@ -16,6 +16,7 @@ Modelo de threading:
 from __future__ import annotations
 
 import asyncio
+import inspect
 import threading
 from dataclasses import dataclass, field
 from typing import Callable
@@ -62,6 +63,34 @@ def _safe_tool_args_for_log(args: dict, max_chars: int = 240) -> dict:
     return safe
 
 
+def _call_compatible(callback: Callable, *args) -> None:
+    """Call callback with as many positional args as it can accept.
+
+    Keeps SessionCallbacks source-compatible with older 1-arg/3-arg tool
+    callbacks while allowing richer args/response callbacks for the overlay.
+    """
+    try:
+        sig = inspect.signature(callback)
+    except (TypeError, ValueError):
+        callback(*args)
+        return
+
+    params = list(sig.parameters.values())
+    if any(p.kind == inspect.Parameter.VAR_POSITIONAL for p in params):
+        callback(*args)
+        return
+
+    positional = [
+        p
+        for p in params
+        if p.kind in (
+            inspect.Parameter.POSITIONAL_ONLY,
+            inspect.Parameter.POSITIONAL_OR_KEYWORD,
+        )
+    ]
+    callback(*args[: len(positional)])
+
+
 @dataclass
 class SessionCallbacks:
     """Callbacks invocados desde el thread asyncio de la sesion.
@@ -82,9 +111,10 @@ class SessionCallbacks:
     # Disparado al iniciar/terminar un tool dispatch. Util para mostrar
     # feedback en el overlay ("Consultando con Claude...") durante tools
     # largos donde Gemini queda mudo esperando el FunctionResponse.
-    # on_tool_end recibe (name, elapsed_ms, ok).
-    on_tool_start: Callable[[str], None] = lambda _: None
-    on_tool_end: Callable[[str, float, bool], None] = lambda *_: None
+    # on_tool_start recibe (name, args).
+    # on_tool_end recibe (name, elapsed_ms, ok, response).
+    on_tool_start: Callable[[str, dict], None] = lambda *_: None
+    on_tool_end: Callable[[str, float, bool, object], None] = lambda *_: None
 
 
 @dataclass
@@ -103,6 +133,13 @@ class SessionConfig:
     # mas margen a Claude sin alargar el resto. Si la tool no esta listada
     # cae en `tool_timeout_s`.
     tool_timeouts_s: dict[str, float] = field(default_factory=dict)
+    # Context window compression: ventana deslizante que comprime turnos viejos
+    # cuando el contexto se acerca al limite, para que sesiones LARGAS no se
+    # saturen (sintoma: respuestas lentisimas y "empieza de cero" al truncar).
+    # trigger_tokens=cuando dispara la compresion; target_tokens=a cuanto baja.
+    context_compression: bool = True
+    context_trigger_tokens: int = 25600
+    context_target_tokens: int = 12800
 
 
 class JarvisSession:
@@ -263,6 +300,19 @@ class JarvisSession:
             session_resumption=resumption,
             media_resolution=types.MediaResolution.MEDIA_RESOLUTION_LOW,
         )
+        # Context window compression: clave para sesiones LARGAS. Sin esto, el
+        # contexto de Live se llena -> respuestas lentisimas y reset ("empieza
+        # de cero"). La ventana deslizante comprime turnos viejos al superar
+        # trigger_tokens, bajando a target_tokens, manteniendo la sesion viva.
+        if self.config.context_compression:
+            live_cfg_kwargs["context_window_compression"] = (
+                types.ContextWindowCompressionConfig(
+                    trigger_tokens=self.config.context_trigger_tokens,
+                    sliding_window=types.SlidingWindow(
+                        target_tokens=self.config.context_target_tokens
+                    ),
+                )
+            )
         if self.config.enable_input_transcription:
             live_cfg_kwargs["input_audio_transcription"] = (
                 types.AudioTranscriptionConfig()
@@ -505,7 +555,7 @@ class JarvisSession:
             timeout = self.config.tool_timeouts_s.get(name, self.config.tool_timeout_s)
             self.cb.on_log(f"tool_call: {name}({_safe_tool_args_for_log(args)}) [timeout={timeout:.0f}s]")
             try:
-                self.cb.on_tool_start(name)
+                _call_compatible(self.cb.on_tool_start, name, args)
             except Exception as exc:
                 self.cb.on_log(f"on_tool_start callback fallo: {exc}")
             t0 = _time.perf_counter()
@@ -542,7 +592,8 @@ class JarvisSession:
             elapsed_ms = (_time.perf_counter() - t0) * 1000
             self.cb.on_log(f"tool_response: {name} -> {elapsed_ms:.0f}ms (ok={ok})")
             try:
-                self.cb.on_tool_end(name, elapsed_ms, ok)
+                response_for_callback = getattr(result, "response", result)
+                _call_compatible(self.cb.on_tool_end, name, elapsed_ms, ok, response_for_callback)
             except Exception as exc:
                 self.cb.on_log(f"on_tool_end callback fallo: {exc}")
             response = getattr(result, "response", result)

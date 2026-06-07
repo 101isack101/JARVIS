@@ -69,3 +69,49 @@ def test_safe_action_executor_open_url_validates_scheme(tmp_path, monkeypatch):
     assert ok["executed"] is True
     assert opened == [("https://example.com", 2)]
     assert blocked["allowed"] is False
+
+
+def test_structured_read_file_blocks_parent_escape(tmp_path):
+    root = tmp_path / "root"
+    root.mkdir()
+    outside = tmp_path / "outside.txt"
+    outside.write_text("secret", encoding="utf-8")
+    ex = SafeActionExecutor(root=root, mode="prod")
+
+    result = ex.run_structured("read_file", path="../outside.txt")
+
+    assert result["allowed"] is False
+    assert "fuera del root" in result["error"]
+
+
+def test_structured_read_file_blocks_secret_paths(tmp_path):
+    env_file = tmp_path / ".env"
+    env_file.write_text("TOKEN=abc", encoding="utf-8")
+    ex = SafeActionExecutor(root=tmp_path, mode="prod")
+
+    result = ex.run_structured("read_file", path=".env")
+
+    assert result["allowed"] is False
+    assert "sensible" in result["error"]
+
+
+def test_structured_read_file_reads_inside_project(tmp_path):
+    note = tmp_path / "README.md"
+    note.write_text("Jarvis docs", encoding="utf-8")
+    ex = SafeActionExecutor(root=tmp_path, mode="prod")
+
+    result = ex.run_structured("read_file", path="README.md")
+
+    assert result["ok"] is True
+    assert result["content"] == "Jarvis docs"
+
+
+def test_structured_search_text_skips_secret_paths(tmp_path):
+    (tmp_path / "notes.md").write_text("visible needle", encoding="utf-8")
+    (tmp_path / "token_notes.md").write_text("hidden needle", encoding="utf-8")
+    ex = SafeActionExecutor(root=tmp_path, mode="prod")
+
+    result = ex.run_structured("search_text", query="needle")
+
+    assert result["ok"] is True
+    assert result["matches"] == [{"path": "notes.md", "line": 1, "text": "visible needle"}]

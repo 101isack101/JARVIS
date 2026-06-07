@@ -67,7 +67,11 @@ def _format_rag(results: list) -> tuple[str, int]:
         snippet = " ".join((r.chunk.text or "").split())
         if len(snippet) > 220:
             snippet = snippet[:217].rstrip() + "..."
-        lines.append(f"- [score {r.score:.2f}] {snippet}")
+        source = getattr(r.chunk, "source_type", "")
+        title = getattr(r.chunk, "title", "")
+        prefix = f"{source}:{title}" if source and title else title or source
+        label = f" {prefix}" if prefix else ""
+        lines.append(f"- [score {r.score:.2f}{label}] {snippet}")
     return "\n".join(lines), len(kept)
 
 
@@ -81,6 +85,7 @@ def build_project_context(
     prompt: str,
     *,
     token_budget: int = DEFAULT_TOKEN_BUDGET,
+    semantic_memory=None,
 ) -> ContextResult:
     project = triage_mod.detect_project(prompt or "")
     if not project:
@@ -103,7 +108,8 @@ def build_project_context(
         candidates.append(("session", "Sesión anterior", recall))
 
     try:
-        rag_results = rag.search(prompt, top_k=RAG_TOP_K)
+        searcher = semantic_memory or rag
+        rag_results = searcher.search(prompt, top_k=RAG_TOP_K)
     except Exception:
         rag_results = []
     rag_text, rag_count = _format_rag(rag_results)

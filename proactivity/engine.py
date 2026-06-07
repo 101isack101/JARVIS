@@ -34,12 +34,13 @@ class ProactivityEngine:
             return ""
         return render_briefing(opps, top_k=self.config.briefing_top_k)
 
-    def observe(self, vault, rag, turn_text: str) -> None:
+    def observe(self, vault, rag, turn_text: str, semantic_memory=None) -> None:
         if not self.config.enabled or not (turn_text or "").strip():
             return
         try:
             states = build_project_states(vault)
-            self.queue.ingest(detect_contextual_signals(turn_text, states, rag, self.config))
+            searcher = semantic_memory or rag
+            self.queue.ingest(detect_contextual_signals(turn_text, states, searcher, self.config))
         except Exception:
             pass
 

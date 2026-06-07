@@ -18,10 +18,12 @@ from __future__ import annotations
 
 import os
 import sys
+import threading
 import uuid
 from datetime import datetime
 from pathlib import Path
 
+import numpy as np
 from dotenv import load_dotenv
 
 if sys.platform == "win32":
@@ -47,6 +49,7 @@ from memory.indexer import IncrementalIndexer
 from memory import notes as notes_mod
 from memory.obsidian_vault import ObsidianVault
 from memory.rag import VaultRAG
+from memory.semantic import SemanticMemoryIndex, SourceRegistry
 from memory.session_journal import SessionJournal
 from memory.session_summary import (
     synthesize_and_save,
@@ -80,6 +83,126 @@ from vision.screen import ScreenCapture
 # emita logs. configure_logger es idempotente.
 configure_logger()
 log = get_logger("jarvis")
+
+
+def _install_crash_capture() -> None:
+    """Red de captura de crashes duros que loguru NO ve.
+
+    Tres mecanismos complementarios, todos vuelcan a data/jarvis_crash.log:
+
+    - faulthandler: si el proceso recibe una senal fatal (segfault de una libreria
+      nativa: PIL, sounddevice, torch, ffmpeg via subprocess no, pero si bindings C)
+      vuelca el traceback Python de TODOS los threads antes de morir. Tambien
+      permite disparar un dump manual si el proceso se cuelga.
+    - sys.excepthook: excepciones no capturadas en el thread principal.
+    - threading.excepthook: excepciones no capturadas en threads worker
+      (audio, asyncio, RAG, to_thread). Sin esto, un worker que revienta puede
+      tumbar el proceso sin dejar rastro en el log de loguru.
+
+    Nota: un OOM-kill del SO (Windows mata el proceso por falta de RAM) NO deja
+    traceback ni siquiera aqui — pero entonces la AUSENCIA de crash.log junto a un
+    cierre subito ES la evidencia: descarta excepcion Python y apunta a memoria.
+    """
+    import faulthandler
+    import threading
+    import traceback as _tb
+
+    crash_path = ROOT / "data" / "jarvis_crash.log"
+    crash_path.parent.mkdir(parents=True, exist_ok=True)
+    # Handle persistente: faulthandler exige que el archivo siga abierto.
+    crash_fh = open(crash_path, "a", encoding="utf-8", buffering=1)
+    faulthandler.enable(file=crash_fh, all_threads=True)
+
+    def _dump(header: str, exc_type, exc_value, exc_tb) -> None:
+        stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        crash_fh.write(f"\n{'=' * 70}\n{stamp} | {header}\n{'=' * 70}\n")
+        _tb.print_exception(exc_type, exc_value, exc_tb, file=crash_fh)
+        crash_fh.flush()
+        try:
+            log.error(f"[CRASH] {header}: {exc_type.__name__}: {exc_value}")
+        except Exception:
+            pass
+
+    def _main_hook(exc_type, exc_value, exc_tb):
+        _dump("Uncaught exception (main thread)", exc_type, exc_value, exc_tb)
+        sys.__excepthook__(exc_type, exc_value, exc_tb)
+
+    def _thread_hook(args):
+        _dump(
+            f"Uncaught exception (thread '{args.thread.name}')",
+            args.exc_type,
+            args.exc_value,
+            args.exc_traceback,
+        )
+
+    sys.excepthook = _main_hook
+    threading.excepthook = _thread_hook
+
+    # --- Watchdog de profundidad de stack del MAIN thread ---
+    # Muestrea la pila del hilo principal desde un thread aparte. Si cruza un
+    # umbral (recursion descontrolada en tkinter), vuelca el CICLO *antes* de que
+    # el limite de recursion (1000) reviente el proceso. Lo hace desde una pila
+    # limpia, evitando el problema de "no hay stack para diagnosticar". La funcion
+    # que aparece cientos de veces en el volcado ES el disparador de la recursion.
+    import time as _time
+
+    main_ident = threading.main_thread().ident
+    DEPTH_ALERT = 650
+
+    def _stack_watchdog() -> None:
+        import collections as _collections
+
+        last_dump = 0.0
+        while True:
+            _time.sleep(0.3)
+            try:
+                frame = sys._current_frames().get(main_ident)
+                if frame is None:
+                    continue
+                depth = 0
+                f = frame
+                while f is not None and depth <= DEPTH_ALERT + 4:
+                    depth += 1
+                    f = f.f_back
+                if depth <= DEPTH_ALERT:
+                    continue
+                now = _time.time()
+                if now - last_dump < 8.0:
+                    continue
+                last_dump = now
+                counts: dict = _collections.Counter()
+                top: list[str] = []
+                f = frame
+                d = 0
+                while f is not None:
+                    code = f.f_code
+                    counts[(code.co_name, code.co_filename)] += 1
+                    if d < 60:
+                        top.append(f"  {code.co_name}  {code.co_filename}:{f.f_lineno}")
+                    d += 1
+                    f = f.f_back
+                stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                crash_fh.write(
+                    f"\n{'=' * 70}\n{stamp} | STACK WATCHDOG: main thread a {d} frames\n{'=' * 70}\n"
+                )
+                crash_fh.write("Funciones mas repetidas (el top es el CICLO de recursion):\n")
+                for (name, filename), n in counts.most_common(10):
+                    crash_fh.write(f"  {n:>5}x  {name}  ({filename})\n")
+                crash_fh.write("\nPrimeros 60 frames desde el tope de la pila:\n")
+                for line in top:
+                    crash_fh.write(line + "\n")
+                crash_fh.flush()
+                try:
+                    log.error(f"[STACK WATCHDOG] main thread a {d} frames; ciclo volcado a crash log")
+                except Exception:
+                    pass
+            except Exception:
+                pass
+
+    threading.Thread(target=_stack_watchdog, name="JarvisStackWatchdog", daemon=True).start()
+
+    log.info(f"Crash capture instalado -> {crash_path}")
+
 
 USAGE_FLUSH_MS = 10_000
 THINKING_WATCHDOG_MS = 15_000
@@ -178,6 +301,9 @@ class Jarvis:
         # Detector wake-word (lazy: se carga al entrar en LIBRE). None = aun no
         # cargado o dependencia ausente (barge-in degradado).
         self._wakeword: WakeWordGate | None = None
+        # Serializa la carga de modelos de LIBRE (Silero VAD + wakeword) para que
+        # el pre-warm de arranque y un toggle a LIBRE no la hagan dos veces a la vez.
+        self._libre_models_lock = threading.Lock()
         # True mientras Jarvis reproduce su voz en LIBRE (ventana de barge-in).
         self._libre_speaking = False
         # Pico de score wake-word del turno hablado actual (diagnostico): nos
@@ -238,6 +364,27 @@ class Jarvis:
         self.rag._embed(["pre-warm"])
         log.info("Modelo pre-cargado.")
 
+        # Multi-source semantic memory. Fail-safe: Jarvis keeps using the legacy
+        # Obsidian RAG if this index cannot be loaded or built.
+        self.semantic_memory = None
+        if SemanticMemoryIndex.enabled():
+            try:
+                self.semantic_memory = SemanticMemoryIndex.from_env(ROOT)
+                self.semantic_memory.model = self.rag.model
+                if not self.semantic_memory.load():
+                    log.info("Semantic memory no encontrada. Indexando fuentes locales seguras...")
+                    registry = SourceRegistry(vault=self.vault, workspace_root=ROOT.parent)
+                    stats = self.semantic_memory.rebuild(registry)
+                    log.info(f"Semantic memory indexada: {stats}")
+                else:
+                    log.info(
+                        f"Semantic memory cargada: {len(self.semantic_memory.chunks)} chunks de "
+                        f"{len(self.semantic_memory.manifest)} documentos"
+                    )
+            except Exception as exc:
+                log.warning(f"[WARN] semantic memory deshabilitada por fallo: {exc}")
+                self.semantic_memory = None
+
         # Fase 1 — Continuidad: reconciliar journal huérfano (síntesis diferida)
         # y recuperar el resumen de la última sesión para inyectarlo al prompt.
         recall_block = ""
@@ -257,6 +404,13 @@ class Jarvis:
                         try:
                             self.rag.index_file(p)
                             self.rag.save()
+                            if self.semantic_memory is not None:
+                                registry = SourceRegistry(
+                                    vault=self.vault,
+                                    workspace_root=ROOT.parent,
+                                    sources=("obsidian",),
+                                )
+                                self.semantic_memory.index_documents(registry.iter_documents())
                         except Exception as exc:
                             log.warning(f"[WARN] no se indexó nota huérfana: {exc}")
                     else:
@@ -302,6 +456,7 @@ class Jarvis:
         self.tool_ctx = ToolContext(
             vault=self.vault,
             rag=self.rag,
+            semantic_memory=self.semantic_memory,
             reasoner=self.reasoner,
             tracker=self.tracker,
             gate=self.gate,
@@ -329,7 +484,11 @@ class Jarvis:
         self.vad: VADGate | None = None  # lazy load en modo libre
 
         # Overlay
-        self.overlay = create_overlay(self.tracker, self.gate, on_close=self.stop)
+        self.overlay = create_overlay(
+            self.tracker,
+            self.gate,
+            on_close=lambda: self.stop(close_overlay=False),
+        )
         # Arranca el pump de UI en el main thread: drena _ui_thread y se re-arma.
         # El primer after() se registra aquí (build corre en el main thread), así
         # que toda llamada Tcl posterior queda en el thread del mainloop.
@@ -435,17 +594,25 @@ class Jarvis:
         self.overlay.set_mode("PTT")
         self._schedule_usage_flush()
         self._schedule_thinking_watchdog()
+        # Pre-warm de los modelos de LIBRE (Silero VAD + wakeword) en background,
+        # igual que el pre-warm de embeddings. Asi el primer toggle a modo libre es
+        # instantaneo en vez de congelar el thread del hotkey 1-3s mientras cargan.
+        threading.Thread(
+            target=self._ensure_libre_models, name="JarvisLibrePrewarm", daemon=True
+        ).start()
 
-    def stop(self) -> None:
+    def stop(self, *, close_overlay: bool = True) -> None:
         if self._stopping:
             return
         self._stopping = True
         self._log("Cerrando Jarvis...")
+        if close_overlay:
+            self._tk(lambda: self.overlay.close(), force=True)
         try: self.hotkey_listener.stop()
         except Exception: pass
         try: self.session.stop()
         except Exception: pass
-        self._tk(lambda: self.overlay.set_connection_status("stopped", ""))
+        self._tk(lambda: self.overlay.set_connection_status("stopped", ""), force=True)
         try: self.indexer.stop()
         except Exception: pass
         try: self.capture.stop()
@@ -464,7 +631,7 @@ class Jarvis:
         try:
             self.overlay.run()
         finally:
-            self.stop()
+            self.stop(close_overlay=False)
 
     # ---- Hotkey handlers (llamados desde thread de keyboard) ----
 
@@ -509,12 +676,12 @@ class Jarvis:
 
         if target == "LIBRE":
             self.mode = "LIBRE"
-            if self.vad is None:
-                self._log("Cargando Silero VAD para modo libre...")
-                self.vad = VADGate()
-            self.vad.reset()
-            if self._barge_in_enabled:
-                self._ensure_wakeword()
+            # Modelos ya pre-cargados en background al arranque -> normalmente
+            # instantaneo. Si el usuario fue mas rapido que el pre-warm, esto los
+            # carga ahora (el lock evita doble carga).
+            self._ensure_libre_models()
+            if self.vad is not None:
+                self.vad.reset()
             if self._aec is not None:
                 self._aec.reset()
             self._libre_in_activity = False
@@ -612,7 +779,13 @@ class Jarvis:
             return
         # En modo LIBRE, VAD local controla activity boundaries.
         # En modo PTT, los maneja la hotkey (press = start, release = end).
-        if self.mode == "LIBRE" and self.vad is not None:
+        if self.mode == "LIBRE":
+            if self.vad is None:
+                # VAD aun cargando (pre-warm en background) o no disponible: en
+                # LIBRE NO streameamos el mic sin gating de VAD — eso dispararia
+                # coste y, en modo manual, audio sin activity boundaries. Mejor
+                # descartar el chunk hasta que el VAD este listo.
+                return
             # Mientras Jarvis habla:
             #  - barge-in ON: el mic sigue vivo; buscamos voz tuya sostenida y
             #    de alta confianza para cortarlo. Nada de esto se manda a Gemini
@@ -671,8 +844,14 @@ class Jarvis:
         try:
             far24 = np.frombuffer(pcm24k_bytes, dtype=np.int16).astype(np.float32) / 32768.0
             self._aec.push_far(resample_24k_to_16k(far24))
-        except Exception:
-            pass
+        except Exception as exc:
+            # Corre en el thread de salida de sounddevice (~cada 42ms). Tragar el
+            # fallo en silencio es lo que ocultó el NameError de numpy durante toda
+            # la vida del feature: el AEC quedaba sin far-end y el barge-in degradado.
+            # Avisamos UNA vez (sin spamear el hot path) para que nunca vuelva a pasar.
+            if not getattr(self, "_aec_push_warned", False):
+                self._aec_push_warned = True
+                self._log(f"[WARN] AEC push_far falló (eco no se cancelará): {type(exc).__name__}: {exc}")
 
     def _detect_barge_in(self, pcm_bytes: bytes) -> None:
         """Detecta la wake-word mientras Jarvis habla, para cortarlo (LIBRE).
@@ -722,6 +901,22 @@ class Jarvis:
 
     def _on_connected(self) -> None:
         self._log("Conectado a Gemini Live")
+        # Reconexion en LIBRE: la sesion NUEVA no heredo el activity_start que
+        # mandamos a la anterior (que ya murio). Si dejaramos _libre_in_activity=True,
+        # el VAD nunca reabriria una actividad y el turno quedaria colgado (sintoma
+        # tipico en sesiones largas). Reseteamos a pizarra limpia para que el proximo
+        # chunk de voz abra una actividad fresca contra la sesion actual.
+        if self.mode == "LIBRE":
+            self._libre_in_activity = False
+            self._libre_speaking = False
+            self._last_activity_end_ms = 0
+            if self.vad is not None:
+                self.vad.reset()
+            if self._aec is not None:
+                self._aec.reset()
+            if self._wakeword is not None:
+                self._wakeword.reset()
+            self._set_overlay_state("listening")
 
     def _on_connection_status(self, status: str, detail: str = "") -> None:
         self._tk(lambda: self.overlay.set_connection_status(status, detail))
@@ -748,7 +943,10 @@ class Jarvis:
             else:
                 self.capture.stop_recording()
         self._set_overlay_state("speaking")
-        self._tk(lambda b=pcm_bytes: self.overlay.feed_voice_audio(b))
+        self._tk(
+            lambda b=pcm_bytes: self.overlay.feed_voice_audio(b),
+            coalesce_key="voice_audio",
+        )
         self.player.push(pcm_bytes)
 
     def _on_gemini_text(self, text: str) -> None:
@@ -818,7 +1016,12 @@ class Jarvis:
                 # Fase 3 — Proactividad: observar el turno (encola, NO emite).
                 if self.proactivity is not None and user_delta:
                     try:
-                        self.proactivity.observe(self.vault, self.rag, user_delta)
+                        self.proactivity.observe(
+                            self.vault,
+                            self.rag,
+                            user_delta,
+                            semantic_memory=self.semantic_memory,
+                        )
                     except Exception as exc:
                         self._log(f"[WARN] proactividad (observe) falló: {exc}")
             except Exception as exc:
@@ -876,32 +1079,48 @@ class Jarvis:
         else:
             log.info(msg)
 
-    _UI_POLL_MS = 16  # ~60fps: latencia imperceptible para updates de overlay
+    _UI_ACTIVE_POLL_MS = 16  # ~60fps mientras hay trabajo pendiente.
+    _UI_IDLE_POLL_MS = 80    # Reduce churn de comandos Tcl cuando la UI esta quieta.
+    _UI_MAX_CALLBACKS_PER_PUMP = 80
 
-    def _tk(self, fn) -> None:
+    def _tk(self, fn, *, coalesce_key: str | None = None, force: bool = False) -> None:
         """Marshalla a main thread tkinter de forma thread-safe.
 
         Encola en _ui_thread (operación Python pura, sin Tcl) en vez de llamar
         root.after() desde el thread llamante. El pump del main thread drena la
         cola. Seguro desde cualquier thread, incl. workers de to_thread (que es
         donde corre la aprobación HITL y antes abortaba el proceso)."""
+        if self._stopping and not force:
+            return
         try:
-            self._ui_thread.submit(fn)
+            if force:
+                self._ui_thread.submit_force(fn)
+            elif coalesce_key:
+                self._ui_thread.submit_latest(coalesce_key, fn)
+            else:
+                self._ui_thread.submit(fn)
         except Exception:
             pass
 
     def _install_ui_pump(self) -> None:
         """Instala (desde el main thread) el pump que drena _ui_thread vía after."""
         def _pump() -> None:
-            self._ui_thread.drain()
+            max_callbacks = None if self._stopping else self._UI_MAX_CALLBACKS_PER_PUMP
+            drained = self._ui_thread.drain(max_callbacks=max_callbacks)
             if self._stopping:
                 return
             try:
-                self.overlay.root.after(self._UI_POLL_MS, _pump)
+                more_pending = self._ui_thread.pending() > 0
+                delay_ms = (
+                    self._UI_ACTIVE_POLL_MS
+                    if more_pending or drained >= self._UI_MAX_CALLBACKS_PER_PUMP
+                    else self._UI_IDLE_POLL_MS
+                )
+                self.overlay.root.after(delay_ms, _pump)
             except Exception:
                 pass
         try:
-            self.overlay.root.after(self._UI_POLL_MS, _pump)
+            self.overlay.root.after(self._UI_ACTIVE_POLL_MS, _pump)
         except Exception:
             pass
 
@@ -911,7 +1130,10 @@ class Jarvis:
             self._thinking_since_ms = int(time.time() * 1000)
         elif state in ("idle", "listening", "speaking", "blocked"):
             self._thinking_since_ms = None
-        self._tk(lambda: self.overlay.set_state(state))
+        self._tk(
+            lambda s=state: self.overlay.set_state(s),
+            coalesce_key="overlay_state",
+        )
 
     def _schedule_usage_flush(self) -> None:
         if self._stopping:
@@ -964,6 +1186,25 @@ class Jarvis:
             self._log(f"[WARN] ClaudeReasoner no disponible: {type(exc).__name__}: {exc}")
             return None
 
+    def _ensure_libre_models(self) -> None:
+        """Carga (idempotente, thread-safe) los modelos de LIBRE: Silero VAD y,
+        si el barge-in esta activo, el wakeword.
+
+        La llaman el pre-warm de arranque (background) y _apply_listen_mode. El
+        lock evita que ambos carguen a la vez. Pre-cargar al arranque hace que el
+        toggle a LIBRE sea instantaneo en vez de congelar el thread del hotkey o
+        del worker de la tool durante la carga (1-3s de Silero/ONNX).
+        """
+        with self._libre_models_lock:
+            if self.vad is None:
+                self._log("Cargando Silero VAD para modo libre...")
+                try:
+                    self.vad = VADGate()
+                except Exception as exc:
+                    self._log(f"[WARN] no pude cargar Silero VAD: {type(exc).__name__}: {exc}")
+            if self._barge_in_enabled:
+                self._ensure_wakeword()
+
     def _ensure_wakeword(self) -> None:
         """Carga perezosa del detector wake-word para el barge-in (LIBRE).
 
@@ -1014,6 +1255,7 @@ class Jarvis:
 
 
 def main() -> int:
+    _install_crash_capture()
     print("=" * 60)
     print("  JARVIS — Asistente Conversacional Tiempo Real")
     print("  Sesion local · Sonnet 4.6 + Gemini 3.1 Flash Live")

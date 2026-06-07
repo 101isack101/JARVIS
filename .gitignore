@@ -13,6 +13,7 @@
 *secret*
 *credentials*
 *token*
+!security/secret_filter.py
 
 # Python
 __pycache__/

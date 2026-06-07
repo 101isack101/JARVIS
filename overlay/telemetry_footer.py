@@ -1,9 +1,9 @@
 """
 overlay/telemetry_footer.py - Footer compacto con barras de budget.
 
-Diseno: una linea horizontal al pie del overlay, ~22px alto, siempre visible.
+Diseno: una linea horizontal al pie del overlay, ~30px alto, siempre visible.
 Renderiza por modelo (Gemini + Claude) una barra de budget con codigo de color
-y texto compacto: "Gemini 14.2k tok $0.42/$2.00".
+y texto compacto: "Gemini 14.2k $0.42/$2.00".
 
 Lee del TokenTracker via polling con root.after(500ms). No bloquea ni la UI ni
 el thread de la sesion porque solo lee numeros atomicos.
@@ -14,19 +14,16 @@ from __future__ import annotations
 import tkinter as tk
 from typing import Callable
 
+from overlay.ui_theme import BG, BORDER_SOFT, FONT_DISPLAY, FONT_MONO, FONT_UI, TEXT_DIM, TEXT_PRIMARY
 from telemetry.budgets import BudgetGate, BudgetReport, BudgetStatus, ProviderBudget
 from telemetry.tracker import TokenTracker
 
 REFRESH_MS = 500
-HEIGHT = 24
-PAD_X = 8
-BAR_WIDTH = 80
-BAR_HEIGHT = 8
-
-BG = "#0d1117"
-FG = "#9ca3af"
-FG_BRIGHT = "#e5e7eb"
-TRACK = "#1f2937"
+HEIGHT = 30
+PAD_X = 12
+BAR_WIDTH = 92
+BAR_HEIGHT = 6
+TRACK = BORDER_SOFT
 
 
 def _format_tokens(n: int) -> str:
@@ -53,8 +50,10 @@ class TelemetryFooter(tk.Frame):
         self.gate = gate
         self._on_blocked = on_blocked or (lambda _: None)
         self._already_blocked: set[str] = set()
+        self._closed = False
+        self._after_id: str | None = None
 
-        # Layout: [Gemini | bar | tokens | $] [Claude | bar | tokens | $] [Σ total]
+        # Layout: [Gemini | bar | tokens | $] [Claude | bar | tokens | $] [total]
         self.gemini_widgets = self._build_provider_block("Gemini")
         self.gemini_widgets["frame"].pack(side="left", padx=(PAD_X, 16))
 
@@ -62,36 +61,64 @@ class TelemetryFooter(tk.Frame):
         self.claude_widgets["frame"].pack(side="left", padx=(0, 16))
 
         self.total_label = tk.Label(
-            self, text="Σ $0.00", bg=BG, fg=FG_BRIGHT,
-            font=("Segoe UI", 9, "bold"),
+            self, text="Total $0.00", bg=BG, fg=TEXT_PRIMARY,
+            font=(FONT_DISPLAY, 9, "bold"),
         )
         self.total_label.pack(side="right", padx=(0, PAD_X))
 
-        # Arrancar polling
-        self.after(REFRESH_MS, self._refresh)
+        self._schedule_refresh()
+
+    def stop(self) -> None:
+        self._closed = True
+        if self._after_id is not None:
+            try:
+                self.after_cancel(self._after_id)
+            except Exception:
+                pass
+            self._after_id = None
+
+    def _schedule_refresh(self) -> None:
+        if self._closed:
+            return
+        try:
+            self._after_id = self.after(REFRESH_MS, self._refresh)
+        except Exception:
+            self._after_id = None
 
     def _build_provider_block(self, name: str) -> dict:
         frame = tk.Frame(self, bg=BG)
         label = tk.Label(
-            frame, text=name, bg=BG, fg=FG,
-            font=("Segoe UI", 9, "bold"), width=7, anchor="w",
+            frame, text=name, bg=BG, fg=TEXT_DIM,
+            font=(FONT_DISPLAY, 8, "bold"), width=7, anchor="w",
         )
         label.pack(side="left")
-        # Canvas para la barra de budget
+
         canvas = tk.Canvas(
             frame, width=BAR_WIDTH, height=BAR_HEIGHT,
             bg=BG, highlightthickness=0,
         )
         canvas.pack(side="left", padx=(2, 6))
-        track_id = canvas.create_rectangle(
-            0, 0, BAR_WIDTH, BAR_HEIGHT, fill=TRACK, outline="",
+        track_id = canvas.create_line(
+            2,
+            BAR_HEIGHT / 2,
+            BAR_WIDTH - 2,
+            BAR_HEIGHT / 2,
+            fill=TRACK,
+            width=BAR_HEIGHT,
+            capstyle="round",
         )
-        bar_id = canvas.create_rectangle(
-            0, 0, 0, BAR_HEIGHT, fill="#3ecf8e", outline="",
+        bar_id = canvas.create_line(
+            2,
+            BAR_HEIGHT / 2,
+            2,
+            BAR_HEIGHT / 2,
+            fill="#9cf5d5",
+            width=BAR_HEIGHT,
+            capstyle="round",
         )
         info = tk.Label(
-            frame, text="0 tok $0.00/$0.00", bg=BG, fg=FG,
-            font=("Consolas", 9), anchor="w",
+            frame, text="0 $0.00/$0.00", bg=BG, fg=TEXT_DIM,
+            font=(FONT_MONO, 9), anchor="w",
         )
         info.pack(side="left")
         return {
@@ -104,14 +131,16 @@ class TelemetryFooter(tk.Frame):
         }
 
     def _refresh(self) -> None:
+        if self._closed:
+            return
+        self._after_id = None
         try:
             report = self.gate.evaluate(self.tracker)
             tokens_by = self.tracker.tokens_by_provider()
             self._render_provider(self.gemini_widgets, report.gemini, tokens_by["gemini"])
             self._render_provider(self.claude_widgets, report.claude, tokens_by["claude"])
             total = report.gemini.spent_usd + report.claude.spent_usd
-            self.total_label.config(text=f"Σ ${total:.4f}")
-            # Disparar callback de blocked solo en transicion (no spam)
+            self.total_label.config(text=f"Total ${total:.4f}")
             if report.gemini.blocked and "gemini" not in self._already_blocked:
                 self._already_blocked.add("gemini")
                 self._on_blocked("gemini")
@@ -121,25 +150,20 @@ class TelemetryFooter(tk.Frame):
         except Exception as exc:
             print(f"[footer] refresh error: {exc}")
         finally:
-            self.after(REFRESH_MS, self._refresh)
+            self._schedule_refresh()
 
     def _render_provider(self, w: dict, pb: ProviderBudget, tokens: int) -> None:
-        # Texto compacto: "1.2k $0.42/$2.00". Se elimino "tok" porque la barra
-        # ya visualiza el uso; tener "tok" ahi consumia ~30px de ancho que
-        # cortaban el bloque de Claude en overlays <=560px.
         info_text = f"{_format_tokens(tokens):>5s} ${pb.spent_usd:>5.3f}/${pb.limit_usd:.2f}"
         w["info"].config(text=info_text)
-        # Barra: largo proporcional, color segun estado
         fill_w = max(0, min(int(BAR_WIDTH * pb.pct), BAR_WIDTH))
         color = pb.status.color
-        w["canvas"].coords(w["bar_id"], 0, 0, fill_w, BAR_HEIGHT)
+        fill_x = max(2, min(BAR_WIDTH - 2, fill_w))
+        w["canvas"].coords(w["bar_id"], 2, BAR_HEIGHT / 2, fill_x, BAR_HEIGHT / 2)
         w["canvas"].itemconfig(w["bar_id"], fill=color)
-        # Tinte el label del provider segun estado
-        label_color = FG_BRIGHT if pb.status != BudgetStatus.OK else FG
+        label_color = TEXT_PRIMARY if pb.status != BudgetStatus.OK else TEXT_DIM
         w["label"].config(fg=label_color)
 
 
-# Smoke test: ventana con tracker simulado, gasto incrementando
 if __name__ == "__main__":
     import sys
     from pathlib import Path
@@ -156,17 +180,19 @@ if __name__ == "__main__":
     root.configure(bg=BG)
 
     tracker = TokenTracker()
-    # Limites bajos para ver gates en pocos segundos
     gate = BudgetGate(gemini_limit_usd=0.05, claude_limit_usd=0.05, hard_stop=False)
 
-    label = tk.Label(root, text="Simulando uso. Vera transiciones de color verde -> amarillo -> naranja -> rojo.",
-                     bg=BG, fg="#9ca3af")
+    label = tk.Label(
+        root,
+        text="Simulando uso. Veras transiciones de color verde -> amarillo -> naranja -> rojo.",
+        bg=BG,
+        fg="#9ca3af",
+    )
     label.pack(pady=4)
 
     footer = TelemetryFooter(root, tracker, gate)
     footer.pack(side="bottom", fill="x")
 
-    # Simular uso creciente
     def burn():
         tracker.record("claude-sonnet-4-6", output_tokens=300)
         tracker.record("gemini-3.1-flash-live-preview:audio-out", output_tokens=2500)
