@@ -547,7 +547,7 @@ class JarvisSession:
             self.cb.on_log("tool_call recibido pero sin dispatcher configurado")
             return
         function_responses = []
-        pending_attachments: list[tuple[bytes, str]] = []  # (png_bytes, mime_type)
+        pending_attachments: list[tuple[bytes, str, str]] = []  # (bytes, mime, source)
         dispatcher = self.config.tool_dispatcher
         for fc in getattr(tool_call, "function_calls", []) or []:
             name = fc.name
@@ -602,8 +602,9 @@ class JarvisSession:
                 attach = response.pop("__attach_image") or {}
                 png_bytes = attach.get("png_bytes")
                 mime_type = attach.get("mime_type", "image/png")
+                source = attach.get("source", "tool")
                 if isinstance(png_bytes, (bytes, bytearray)) and png_bytes:
-                    pending_attachments.append((bytes(png_bytes), mime_type))
+                    pending_attachments.append((bytes(png_bytes), mime_type, source))
             function_responses.append(types.FunctionResponse(
                 id=getattr(fc, "id", None),
                 name=name,
@@ -619,12 +620,12 @@ class JarvisSession:
                 return
             # Tras el tool_response, enviar adjuntos como user-content separado
             # (ya valida via send_client_content que send_image usa).
-            for png_bytes, mime_type in pending_attachments:
+            for png_bytes, mime_type, source in pending_attachments:
                 try:
                     await self._async_send_image(
                         png_bytes,
                         mime_type,
-                        prompt=visual_capture_prompt("tool"),
+                        prompt=visual_capture_prompt(source),
                     )
                 except Exception as exc:
                     self.cb.on_error(exc)

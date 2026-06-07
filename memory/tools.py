@@ -53,6 +53,8 @@ class ToolContext:
     tracker: Any | None = None
     gate: Any | None = None
     screen: Any | None = None
+    camera: Any | None = None
+    camera_watch: Any | None = None
     actions: Any | None = None
     modes: Any | None = None
     obsidian_mcp: Any | None = None
@@ -236,6 +238,28 @@ SCREEN_LOOK_DECL = types.FunctionDeclaration(
         "pantalla', 'que ves', 'esto que es', 'que opinas de esto', 'mira esto', "
         "o cualquier referencia a algo visual frente a el. No la uses para buscar "
         "datos sensibles como numeros de cuenta, tarjetas, claves o IDs salvo que "
+        "Isaac lo pida explicitamente en el mismo turno."
+    ),
+    parameters=types.Schema(
+        type=types.Type.OBJECT,
+        properties={
+            "reason": types.Schema(
+                type=types.Type.STRING,
+                description="Motivo breve de la captura.",
+            ),
+        },
+    ),
+)
+
+CAMERA_LOOK_DECL = types.FunctionDeclaration(
+    name="camera_look",
+    description=(
+        "Captura UNA foto de la camara frontal de Isaac y te la entrega para que "
+        "describas o analices lo que te esta mostrando frente a la camara: un objeto, "
+        "una placa o componente FPV/electronica, una nota en papel, la pantalla de un "
+        "multimetro o cargador, etc. Usala cuando Isaac diga 'mira esto', 'que es esto', "
+        "'mira lo que tengo', 'fijate en este objeto' o senale algo fisico. Para ver en "
+        "continuo mientras trabaja, usa camera_watch. No leas datos sensibles salvo que "
         "Isaac lo pida explicitamente en el mismo turno."
     ),
     parameters=types.Schema(
@@ -676,6 +700,7 @@ def all_function_declarations() -> list[types.FunctionDeclaration]:
         JARVIS_LINK_DECL,
         ASK_CLAUDE_DEEP_DECL,
         SCREEN_LOOK_DECL,
+        CAMERA_LOOK_DECL,
         CHROME_READ_PAGE_DECL,
         STUDY_MODE_DECL,
         OBS_MEMORY_DECL,
@@ -1023,6 +1048,35 @@ def screen_look(ctx: ToolContext, reason: str = "") -> dict:
     response["__attach_image"] = {
         "png_bytes": shot.png_bytes,
         "mime_type": shot.mime_type,
+    }
+    return response
+
+
+def camera_look(ctx: ToolContext, reason: str = "") -> dict:
+    """Captura una foto de la webcam y la adjunta como contenido del siguiente turno.
+
+    Mismo patron que screen_look: marcamos la imagen con __attach_image (clave
+    privada) y el dispatcher en gemini/session.py la envia via send_client_content
+    tras el tool_response. Reutiliza la clave 'png_bytes' (el side-channel es
+    agnostico al formato; el mime_type indica que es JPEG).
+    """
+    if ctx.camera is None:
+        return {"captured": False, "error": "Camara no configurada."}
+    try:
+        frame = ctx.camera.capture()
+    except Exception as exc:
+        return {"captured": False, "error": f"{type(exc).__name__}: {exc}"}
+    response = frame.as_dict()
+    response["reason"] = reason
+    response["image_ref"] = frame.path.name
+    response["note"] = (
+        "Foto de camara adjuntada como user-content en el siguiente turno; "
+        "analizala y responde."
+    )
+    response["__attach_image"] = {
+        "png_bytes": frame.jpeg_bytes,
+        "mime_type": frame.mime_type,
+        "source": "camera",
     }
     return response
 
@@ -1725,6 +1779,7 @@ class ToolDispatcher:
             "jarvis_link": lambda **kw: jarvis_link(ctx, **kw),
             "ask_claude_deep": lambda **kw: ask_claude_deep(ctx, **kw),
             "screen_look": lambda **kw: screen_look(ctx, **kw),
+            "camera_look": lambda **kw: camera_look(ctx, **kw),
             "chrome_read_page": lambda **kw: chrome_read_page(**kw),
             "study_mode": lambda **kw: study_mode(ctx, **kw),
             "obs_memory": lambda **kw: obs_memory(ctx, **kw),

@@ -61,3 +61,26 @@ def test_capture_releases_device_in_ondemand(tmp_path):
     cam = CameraCapture(out_dir=tmp_path, index=0, device_factory=factory)
     cam.capture()
     assert holder["dev"].released is True  # open->grab->close
+
+
+def test_camera_look_returns_attach_image(tmp_path):
+    from memory.tools import ToolContext, camera_look
+
+    cam = CameraCapture(out_dir=tmp_path, index=0, device_factory=_factory())
+    ctx = ToolContext(vault=None, rag=None, camera=cam)
+    out = camera_look(ctx, reason="mira esto")
+    assert out["captured"] is True
+    assert out["reason"] == "mira esto"
+    attach = out["__attach_image"]
+    assert attach["mime_type"] == "image/jpeg"
+    assert attach["source"] == "camera"
+    assert attach["png_bytes"][:3] == b"\xff\xd8\xff"  # reutiliza la clave png_bytes
+
+
+def test_camera_look_without_camera_reports_error():
+    from memory.tools import ToolContext, camera_look
+
+    ctx = ToolContext(vault=None, rag=None, camera=None)
+    out = camera_look(ctx, reason="x")
+    assert out["captured"] is False
+    assert "error" in out
