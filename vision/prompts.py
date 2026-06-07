@@ -18,6 +18,12 @@ def visual_capture_prompt(source: str) -> str:
             "Trata esto como una nueva referencia visual del momento, no como "
             "continuacion automatica de una tarea previa."
         )
+    elif source == "camera":
+        intro = (
+            "Isaac te muestra esto en vivo por su camara. "
+            "Trata esto como una nueva referencia visual del momento; describi lo "
+            "que ve, ayudalo o opina segun lo que aparezca frente a la camara."
+        )
     elif source == "tool":
         intro = (
             "Esta es la captura que Isaac pidio con screen_look. "

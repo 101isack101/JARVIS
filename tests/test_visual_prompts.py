@@ -14,3 +14,9 @@ def test_visual_prompt_treats_hotkey_capture_as_new_visual_context():
 
     assert "nueva referencia visual" in prompt
     assert "no conviertas la captura en una busqueda de datos" in prompt
+
+
+def test_visual_prompt_camera_source_is_live_visual_context():
+    prompt = visual_capture_prompt("camera").lower()
+    assert "camara" in prompt
+    assert "no busques" in prompt  # mantiene el privacy guard
