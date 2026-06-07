@@ -55,6 +55,8 @@ class ToolContext:
     screen: Any | None = None
     camera: Any | None = None
     camera_watch: Any | None = None
+    genai_client: Any | None = None
+    on_focus_box: Callable[..., None] | None = None
     actions: Any | None = None
     modes: Any | None = None
     obsidian_mcp: Any | None = None
@@ -268,6 +270,52 @@ CAMERA_LOOK_DECL = types.FunctionDeclaration(
             "reason": types.Schema(
                 type=types.Type.STRING,
                 description="Motivo breve de la captura.",
+            ),
+        },
+    ),
+)
+
+CAMERA_WATCH_DECL = types.FunctionDeclaration(
+    name="camera_watch",
+    description=(
+        "Activa o desactiva el MODO VISION: JARVIS ve en continuo por la camara "
+        "frontal mientras Isaac trabaja o le muestra algo en movimiento. Usa "
+        "action='start' cuando Isaac diga 'modo vision', 'mira lo que hago', "
+        "'guiame con esto', 'observa mientras...'. Usa action='stop' cuando diga "
+        "'ya', 'salir de modo vision', 'deja de mirar', 'listo'. El modo se apaga "
+        "solo tras unos segundos por seguridad. Para una sola foto usa camera_look."
+    ),
+    parameters=types.Schema(
+        type=types.Type.OBJECT,
+        properties={
+            "action": types.Schema(
+                type=types.Type.STRING,
+                description="start para activar, stop para desactivar.",
+            ),
+            "duration_s": types.Schema(
+                type=types.Type.NUMBER,
+                description="Segundos de observacion al iniciar (default 90, max 180).",
+            ),
+        },
+        required=["action"],
+    ),
+)
+
+CAMERA_FOCUS_DECL = types.FunctionDeclaration(
+    name="camera_focus",
+    description=(
+        "Marca con un crosshair el objeto principal que Isaac te esta mostrando por "
+        "la camara y dibuja un recuadro sobre el en el preview. Usala cuando Isaac "
+        "diga 'enfoca esto', 'que es esto exactamente', 'senala lo que ves', "
+        "'marca el objeto'. Requiere que haya una captura reciente (camera_look o "
+        "modo vision activo)."
+    ),
+    parameters=types.Schema(
+        type=types.Type.OBJECT,
+        properties={
+            "label": types.Schema(
+                type=types.Type.STRING,
+                description="Pista opcional de que objeto enfocar.",
             ),
         },
     ),
@@ -701,6 +749,8 @@ def all_function_declarations() -> list[types.FunctionDeclaration]:
         ASK_CLAUDE_DEEP_DECL,
         SCREEN_LOOK_DECL,
         CAMERA_LOOK_DECL,
+        CAMERA_WATCH_DECL,
+        CAMERA_FOCUS_DECL,
         CHROME_READ_PAGE_DECL,
         STUDY_MODE_DECL,
         OBS_MEMORY_DECL,
@@ -1079,6 +1129,37 @@ def camera_look(ctx: ToolContext, reason: str = "") -> dict:
         "source": "camera",
     }
     return response
+
+
+def camera_watch(ctx: ToolContext, action: str = "start", duration_s: float | None = None) -> dict:
+    """Activa/desactiva el modo vision continuo (CameraWatchController)."""
+    ctrl = ctx.camera_watch
+    if ctrl is None:
+        return {"ok": False, "active": False, "error": "Modo vision no configurado."}
+    act = (action or "start").strip().lower()
+    if act == "stop":
+        return ctrl.stop()
+    if act == "start":
+        return ctrl.start(duration_s=duration_s)
+    return {"ok": False, "active": ctrl.is_active(), "error": f"action invalida: {action}"}
+
+
+def camera_focus(ctx: ToolContext, label: str = "") -> dict:
+    """Detecta el objeto principal del ultimo frame y dispara el crosshair."""
+    import vision.detect as detect
+
+    if ctx.camera is None or ctx.camera.last is None:
+        return {"found": False, "error": "No hay captura reciente de camara."}
+    frame = ctx.camera.last
+    result = detect.detect_object(ctx.genai_client, frame.jpeg_bytes)
+    if result is None:
+        return {"found": False, "note": "No pude ubicar el objeto con precision."}
+    if ctx.on_focus_box is not None:
+        try:
+            ctx.on_focus_box(result["box_2d"], result.get("label", ""))
+        except Exception:
+            pass
+    return {"found": True, "label": result.get("label", ""), "box_2d": result["box_2d"]}
 
 
 def chrome_read_page(
@@ -1780,6 +1861,8 @@ class ToolDispatcher:
             "ask_claude_deep": lambda **kw: ask_claude_deep(ctx, **kw),
             "screen_look": lambda **kw: screen_look(ctx, **kw),
             "camera_look": lambda **kw: camera_look(ctx, **kw),
+            "camera_watch": lambda **kw: camera_watch(ctx, **kw),
+            "camera_focus": lambda **kw: camera_focus(ctx, **kw),
             "chrome_read_page": lambda **kw: chrome_read_page(**kw),
             "study_mode": lambda **kw: study_mode(ctx, **kw),
             "obs_memory": lambda **kw: obs_memory(ctx, **kw),

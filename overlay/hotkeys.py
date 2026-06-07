@@ -6,6 +6,7 @@ Hotkeys:
   - Ctrl+Shift+M       -> Toggle modo escucha libre (VAD continuous)
   - Ctrl+Shift+S       -> Capture screen completa (full virtual screen)
   - Ctrl+Alt+S         -> Capture region (snipping: arrastra rectangulo)
+  - Ctrl+Shift+C       -> Capture camara (foto on-demand)
   - Ctrl+Alt+P         -> Pause acciones (Fase 4)
   - Ctrl+Alt+Q         -> Kill-switch: cierra Jarvis inmediatamente
 
@@ -34,6 +35,7 @@ class HotkeyCallbacks:
     on_toggle_listen_mode: Callable[[], None] = lambda: None
     on_capture_screen: Callable[[], None] = lambda: None
     on_capture_region: Callable[[], None] = lambda: None
+    on_capture_camera: Callable[[], None] = lambda: None
     on_pause: Callable[[], None] = lambda: None
     on_kill: Callable[[], None] = lambda: None
 
@@ -64,6 +66,9 @@ class HotkeyListener:
         ))
         self._registered.append(keyboard.add_hotkey(
             "ctrl+alt+s", self.cb.on_capture_region, suppress=False,
+        ))
+        self._registered.append(keyboard.add_hotkey(
+            "ctrl+shift+c", self.cb.on_capture_camera, suppress=False,
         ))
         self._registered.append(keyboard.add_hotkey(
             "ctrl+alt+p", self.cb.on_pause, suppress=False,

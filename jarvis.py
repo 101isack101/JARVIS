@@ -339,6 +339,8 @@ class Jarvis:
         self.approvals = ApprovalBroker(timeout_s=30.0)
         self.actions = SafeActionExecutor(root=ROOT, approval_broker=self.approvals)
         self.screen = ScreenCapture(ROOT / "data" / "screenshots")
+        from vision.camera import CameraCapture
+        self.camera = CameraCapture(ROOT / "data" / "camera")
         self.preferences = ensure_runtime_preferences(ROOT / "data" / "preferences.json")
         self.reasoner = self._build_reasoner()
         self.obsidian_mcp = ObsidianMCPClient(python_exe=sys.executable, cwd=ROOT)
@@ -461,6 +463,7 @@ class Jarvis:
             tracker=self.tracker,
             gate=self.gate,
             screen=self.screen,
+            camera=self.camera,
             actions=self.actions,
             modes=self.modes,
             obsidian_mcp=self.obsidian_mcp,
@@ -511,6 +514,7 @@ class Jarvis:
             on_toggle_listen_mode=self._on_toggle_mode,
             on_capture_screen=self._on_capture_screen,
             on_capture_region=self._on_capture_region,
+            on_capture_camera=self._on_capture_camera,
             on_pause=lambda: self._log("pause pendiente Fase 4"),
             on_kill=self._on_kill,
         )
@@ -565,6 +569,36 @@ class Jarvis:
             callbacks=session_callbacks,
         )
 
+        from vision.camera import CameraWatchController
+        self.camera_watch = CameraWatchController(
+            camera=self.camera,
+            session=self.session,
+            on_state=lambda active: self._tk(
+                lambda: self.overlay.set_camera_active(active)
+            ),
+            on_frame=lambda frame: self._tk(
+                lambda: self.overlay.update_camera_preview(frame)
+            ),
+            gate_check=lambda: self.gate.can_invoke(self.tracker, "gemini"),
+            on_log=self._log,
+        )
+        self.tool_ctx.camera_watch = self.camera_watch
+
+        from google import genai
+        self.tool_ctx.genai_client = genai.Client(
+            api_key=os.environ["GEMINI_API_KEY"],
+            http_options={"api_version": "v1beta"},
+        )
+        self.tool_ctx.on_focus_box = lambda box_2d, lbl: self._tk(
+            lambda: self._apply_focus_box(box_2d, lbl)
+        )
+
+    def _apply_focus_box(self, box_2d, label: str) -> None:
+        from vision.detect import box_to_pixels
+        size = int(os.environ.get("JARVIS_CAMERA_PREVIEW_SIZE", "480"))
+        px = box_to_pixels(box_2d, width=size, height=size, ox=0, oy=0)
+        self.overlay.set_camera_focus(px, label)
+
     def _on_obs_memory_job_done(self, job: dict) -> None:
         title = job.get("title") or "OBS"
         note_path = job.get("note_path") or ""
@@ -608,6 +642,11 @@ class Jarvis:
         self._log("Cerrando Jarvis...")
         if close_overlay:
             self._tk(lambda: self.overlay.close(), force=True)
+        try:
+            if getattr(self, "camera_watch", None):
+                self.camera_watch.stop()
+        except Exception:
+            pass
         try: self.hotkey_listener.stop()
         except Exception: pass
         try: self.session.stop()
@@ -726,6 +765,25 @@ class Jarvis:
             )
         except Exception as exc:
             self._log(f"[SCREEN] error: {type(exc).__name__}: {exc}")
+
+    def _on_capture_camera(self) -> None:
+        if not self.gate.can_invoke(self.tracker, "gemini"):
+            self._log("[CAMERA] captura ignorada: gemini bloqueado por budget")
+            self._set_overlay_state("blocked")
+            return
+        try:
+            frame = self.camera.capture()
+            self._log(f"[CAMERA] capturada {frame.width}x{frame.height}: {frame.path.name}")
+            self._tk(lambda: self.overlay.log_event("Camara capturada", "ok"))
+            self._set_overlay_state("thinking")
+            self.session.send_image(
+                frame.jpeg_bytes,
+                mime_type=frame.mime_type,
+                prompt=visual_capture_prompt("camera"),
+            )
+        except Exception as exc:
+            self._log(f"[CAMERA] error: {type(exc).__name__}: {exc}")
+            self._set_overlay_state("idle" if self.mode == "PTT" else "listening")
 
     def _on_capture_region(self) -> None:
         """Hotkey Ctrl+Alt+S. Llamado desde keyboard thread.
