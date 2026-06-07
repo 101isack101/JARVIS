@@ -15,10 +15,16 @@ python-dotenv>=1.0.1,<2.0
 sounddevice>=0.5.1,<1.0
 soundcard>=0.4.3,<1.0
 numpy>=1.26.0,<3.0
+scipy>=1.11.0,<2.0         # resample_poly para el AEC (referencia 24k->16k)
 
 # VAD local (modo escucha libre)
 silero-vad>=5.1.0,<6.0
 torch>=2.4.0,<3.0          # CPU only, backend de Silero
+
+# Wake-word para barge-in en LIBRE ("Hey JARVIS"). Opcional: si falta, el
+# barge-in se desactiva con gracia. Corre en CPU via onnxruntime.
+openwakeword>=0.6.0,<1.0
+onnxruntime>=1.10.0,<2.0   # backend de inferencia de openWakeWord en Windows
 
 # UI
 # tkinter ya viene con Python 3.11 — no instalar
@@ -34,6 +40,8 @@ websocket-client>=1.8.0,<2.0  # Chrome DevTools Protocol opcional para leer DOM
 # Screen capture
 Pillow>=10.4.0,<12.0       # ImageGrab
 mss>=10.0.0,<11.0          # Multi-monitor rapido
+opencv-python>=4.10.0,<5.0 # CameraCapture (vision/camera.py) + keyframes/OCR visual
+imagehash>=4.3.0,<5.0      # Deduplicacion perceptual de frames
 
 # Memoria + RAG (Obsidian-backed con indexacion incremental)
 faiss-cpu>=1.8.0,<2.0
@@ -41,6 +49,10 @@ sentence-transformers>=3.0.0,<6.0
 watchdog>=4.0.0,<7.0       # File watcher para reindex incremental del vault
 pyyaml>=6.0,<7.0           # Parsear frontmatter YAML de notas Obsidian
 mcp>=1.27.0,<2.0           # MCP server/client local para operar Obsidian
+
+# OBS Memory
+obsws-python>=1.7.0,<2.0   # Control OBS WebSocket v5 (OBS 28+)
+faster-whisper>=1.0.0,<2.0 # Transcripcion local de grabaciones OBS
 
 # Observability
 loguru>=0.7.2,<1.0
