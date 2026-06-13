@@ -251,6 +251,13 @@ class WebJarvisOverlay:
         self._log_path = Path(__file__).resolve().parent.parent / "data" / "jarvis.log"
         self._scheduler = UiScheduler(name="JarvisWebScheduler")
 
+        # Watchdog supervisado (shell Tauri): si la ventana desaparece sin avisar
+        # >grace, apagarse para no dejar un backend zombi con el microfono abierto.
+        self._supervised = _env_truthy("JARVIS_SUPERVISED", False)
+        self._had_client = False
+        self._last_client_seen = time.monotonic()
+        self._watchdog_grace_s = 60.0
+
         self._server = self._start_server()
         self.url = f"http://{self._server.server_address[0]}:{self._server.server_address[1]}/"
         self._server_thread = threading.Thread(
@@ -262,7 +269,9 @@ class WebJarvisOverlay:
 
         self.log_event("Web UI lista", "ok")
         self.after(REFRESH_MS, self._refresh_runtime_panels)
-        if _env_truthy("JARVIS_WEB_UI_OPEN_BROWSER", True):
+        if self._supervised:
+            self.after(10_000, self._watchdog_check)
+        if _env_truthy("JARVIS_WEB_UI_OPEN_BROWSER", True) and not self._supervised:
             self.after(250, lambda: webbrowser.open(self.url))
 
     @property
@@ -302,10 +311,27 @@ class WebJarvisOverlay:
         """Interfaz comun con JarvisOverlay.after(). Usa UiScheduler (headless)."""
         return self._scheduler.after(delay_ms, fn)
 
+    def _watchdog_check(self) -> None:
+        """En modo supervisado (Tauri), si la ventana desaparece > grace, apagarse
+        para no dejar un backend zombi con el microfono abierto. Re-agenda cada 10s."""
+        if self._closed or not self._supervised:
+            return
+        with self._clients_lock:
+            n = len(self._clients)
+        if n > 0:
+            self._last_client_seen = time.monotonic()
+        elif self._had_client and (time.monotonic() - self._last_client_seen) > self._watchdog_grace_s:
+            print(f"[web-ui] supervisado y sin clientes {int(self._watchdog_grace_s)}s; cerrando JARVIS")
+            self.close()
+            return
+        self.after(10_000, self._watchdog_check)
+
     def register_client(self) -> queue.Queue[str]:
         client: queue.Queue[str] = queue.Queue(maxsize=256)
         with self._clients_lock:
             self._clients.add(client)
+        self._had_client = True
+        self._last_client_seen = time.monotonic()
         return client
 
     def unregister_client(self, client: queue.Queue[str]) -> None:

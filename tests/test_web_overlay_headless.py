@@ -162,3 +162,95 @@ def test_camera_methods_no_tk():
         overlay.camera_watch_stop()
     finally:
         overlay.close()
+
+
+# ---- Watchdog supervisado (anti-zombi para shell Tauri) ----
+
+def _make_supervised_overlay(grace_s: float = 0.3):
+    """Overlay con JARVIS_SUPERVISED=1 y grace corto para test rapido."""
+    import os
+    os.environ["JARVIS_SUPERVISED"] = "1"
+    try:
+        overlay = _make_overlay()
+    finally:
+        os.environ.pop("JARVIS_SUPERVISED", None)
+    overlay._watchdog_grace_s = grace_s
+    return overlay
+
+
+def test_supervised_flag_read_from_env():
+    """_supervised refleja JARVIS_SUPERVISED."""
+    plain = _make_overlay()
+    try:
+        assert plain._supervised is False
+    finally:
+        plain.close()
+
+    sup = _make_supervised_overlay()
+    try:
+        assert sup._supervised is True
+    finally:
+        sup.close()
+
+
+def test_watchdog_closes_after_client_leaves():
+    """Supervisado: tras tener un cliente y perderlo > grace, se auto-cierra."""
+    overlay = _make_supervised_overlay(grace_s=0.3)
+    try:
+        # Simular que hubo un cliente y se fue
+        overlay._had_client = True
+        overlay._last_client_seen = time.monotonic() - 1.0  # pasado el grace
+        overlay._watchdog_check()
+        assert overlay.closed, "watchdog no cerro pese a estar supervisado y sin clientes"
+    finally:
+        overlay.close()
+
+
+def test_watchdog_does_not_close_when_unsupervised():
+    """No supervisado: nunca se auto-cierra aunque no haya clientes."""
+    overlay = _make_overlay()
+    overlay._watchdog_grace_s = 0.0
+    try:
+        overlay._had_client = True
+        overlay._last_client_seen = time.monotonic() - 100.0
+        # _watchdog_check no debe cerrar si no es supervisado
+        if hasattr(overlay, "_watchdog_check"):
+            overlay._watchdog_check()
+        assert not overlay.closed
+    finally:
+        overlay.close()
+
+
+def test_watchdog_does_not_close_before_grace():
+    """Supervisado pero dentro del grace: no se cierra."""
+    overlay = _make_supervised_overlay(grace_s=60.0)
+    try:
+        overlay._had_client = True
+        overlay._last_client_seen = time.monotonic()  # recien visto
+        overlay._watchdog_check()
+        assert not overlay.closed, "watchdog cerro antes de tiempo"
+    finally:
+        overlay.close()
+
+
+def test_watchdog_ignores_if_never_had_client():
+    """Supervisado pero nunca tuvo cliente (arranque): no cerrar todavia."""
+    overlay = _make_supervised_overlay(grace_s=0.0)
+    try:
+        overlay._had_client = False
+        overlay._last_client_seen = time.monotonic() - 100.0
+        overlay._watchdog_check()
+        assert not overlay.closed, "watchdog cerro sin que nunca hubiera cliente"
+    finally:
+        overlay.close()
+
+
+def test_register_client_marks_had_client():
+    """register_client marca _had_client=True."""
+    overlay = _make_overlay()
+    try:
+        assert overlay._had_client is False
+        overlay.register_client()
+        assert overlay._had_client is True
+    finally:
+        overlay.close()
