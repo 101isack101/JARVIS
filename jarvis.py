@@ -1057,7 +1057,7 @@ class Jarvis:
         donde Gemini queda mudo varios segundos esperando el response).
         """
         hint = TOOL_HINTS.get(name)
-        self._tk(lambda: self.overlay.record_memory_tool_start(name, args or {}))
+        self._tk(lambda: self.overlay.record_tool_start(name, args or {}))
         if not hint:
             return
         self._tk(lambda: self.overlay.log_event(hint.rstrip(".")))
@@ -1067,7 +1067,7 @@ class Jarvis:
         """Llamado tras el dispatch. Solo logueo aqui; el overlay no necesita
         confirmacion explicita porque la respuesta de Jarvis llegara enseguida."""
         self.latency.record_tool(name, elapsed_ms)
-        self._tk(lambda: self.overlay.record_memory_tool_end(name, elapsed_ms, ok, response))
+        self._tk(lambda: self.overlay.record_tool_end(name, elapsed_ms, ok, response))
         if not ok:
             self._log(f"[TOOL] {name} fallo o timeout tras {elapsed_ms:.0f}ms")
             self._tk(lambda: self.overlay.log_event(f"Tool fallo: {name}", "error"))
@@ -1077,7 +1077,9 @@ class Jarvis:
         # mark_turn_complete devuelve el turno cerrado para logueo inmediato.
         turn = self.latency.mark_turn_complete()
         if turn is not None:
-            self._log(self.latency.format_turn(turn))
+            line = self.latency.format_turn(turn)
+            self._log(line)
+            self._tk(lambda l=line: self.overlay.record_turn_latency(l))
         if self.mode == "PTT":
             self._set_overlay_state("idle")
         # En LIBRE: NO cambiar estado a "listening" aqui; el player puede seguir
@@ -1129,6 +1131,14 @@ class Jarvis:
                 f"[BARGE-IN] wake-word peak={self._wakeword_peak:.2f} este turno "
                 f"(umbral {self._wakeword.threshold:.2f}){erle} — no disparo"
             )
+        if self._libre_speaking or self.mode == "LIBRE":
+            payload: dict = {}
+            if self._aec is not None:
+                payload["erlePeakDb"] = round(float(self._aec_erle_peak), 1)
+            if self._wakeword is not None:
+                payload["wakewordPeak"] = round(float(self._wakeword_peak), 2)
+            if payload:
+                self._tk(lambda p=payload: self.overlay.record_audio_telemetry(p))
         self._libre_speaking = False
         if self._wakeword is not None:
             self._wakeword.reset()

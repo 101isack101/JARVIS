@@ -233,6 +233,9 @@ class WebJarvisOverlay:
         self._events: list[str] = []
         self._event_history: list[tuple[str, str, str]] = []
         self._memory_events: list[dict[str, Any]] = []
+        self._agent_events: list[dict[str, Any]] = []
+        self._audio_telemetry: dict[str, Any] = {}
+        self._latency_lines: list[str] = []
         self._memory_active: dict[str, dict[str, Any]] = {}
         self._pending_approvals: dict[str, Callable[[str, bool], None]] = {}
         self.ui_token = secrets.token_urlsafe(32)
@@ -281,6 +284,10 @@ class WebJarvisOverlay:
         return self._memory_events
 
     @property
+    def agent_events(self) -> list[dict[str, Any]]:
+        return self._agent_events
+
+    @property
     def log_path(self) -> Path:
         return self._log_path
 
@@ -321,6 +328,9 @@ class WebJarvisOverlay:
                 for stamp, level, message in self._event_history[-8:]
             ],
             "memory": self._memory_stats(),
+            "agentEvents": self._agent_events[-30:],
+            "audioTelemetry": self._audio_telemetry,
+            "latency": self._latency_lines,
             "budget": self._budget_payload(),
         }
 
@@ -404,6 +414,65 @@ class WebJarvisOverlay:
         self._output_text = ""
         self.emit("clearTranscripts")
         self.log_event("Transcript reiniciado")
+
+    def record_tool_start(self, name: str, args: dict[str, Any] | None = None) -> None:
+        """Registra cualquier tool para el thought log web.
+
+        Las tools de memoria tambien alimentan el panel historico existente.
+        """
+        args = args or {}
+        entry = {
+            "stamp": time.strftime("%H:%M:%S"),
+            "name": name,
+            "summary": self._tool_args_summary(name, args),
+            "status": "running",
+            "detail": "En progreso",
+            "elapsedMs": None,
+        }
+        self._agent_events.append(entry)
+        self._agent_events = self._agent_events[-150:]
+        self.emit("agentToolStart", entry)
+        self.record_memory_tool_start(name, args)
+
+    def record_tool_end(
+        self,
+        name: str,
+        elapsed_ms: float,
+        ok: bool,
+        response: Any = None,
+    ) -> None:
+        status = "ok" if ok and not self._response_failed(response) else "error"
+        entry = {
+            "stamp": time.strftime("%H:%M:%S"),
+            "name": name,
+            "summary": "",
+            "status": status,
+            "detail": self._memory_response_summary(name, response),
+            "elapsedMs": elapsed_ms,
+        }
+        for idx in range(len(self._agent_events) - 1, -1, -1):
+            existing = self._agent_events[idx]
+            if existing.get("name") == name and existing.get("status") == "running":
+                entry["summary"] = str(existing.get("summary", ""))
+                self._agent_events[idx] = entry
+                break
+        else:
+            self._agent_events.append(entry)
+        self._agent_events = self._agent_events[-150:]
+        self.emit("agentToolEnd", entry)
+        self.record_memory_tool_end(name, elapsed_ms, ok, response)
+
+    def record_audio_telemetry(self, payload: dict[str, Any]) -> None:
+        self._audio_telemetry = {**payload, "stamp": time.strftime("%H:%M:%S")}
+        self.emit("audioTelemetry", self._audio_telemetry)
+
+    def record_turn_latency(self, line: str) -> None:
+        line = " ".join((line or "").split())
+        if not line:
+            return
+        self._latency_lines.append(line)
+        self._latency_lines = self._latency_lines[-20:]
+        self.emit("turnLatency", line)
 
     def record_memory_tool_start(self, name: str, args: dict[str, Any] | None = None) -> None:
         if not self._is_memory_tool(name):
@@ -688,6 +757,15 @@ class WebJarvisOverlay:
             title = str(args.get("title") or args.get("note_path") or "")
             return f"study {action} {self._clip(title, 72)}".strip()
         return name
+
+    def _tool_args_summary(self, name: str, args: dict[str, Any]) -> str:
+        if self._is_memory_tool(name):
+            return self._memory_args_summary(name, args)
+        try:
+            rendered = json.dumps(args, ensure_ascii=False)
+        except Exception:
+            rendered = str(args)
+        return self._clip(rendered, 90)
 
     def _memory_response_summary(self, name: str, response: Any) -> str:
         if not isinstance(response, dict):

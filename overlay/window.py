@@ -699,6 +699,20 @@ class JarvisOverlay:
         self._memory_events = self._memory_events[-120:]
         self.log_event(f"Memoria: {detail}", "ok" if status == "ok" else "error")
 
+    def record_tool_start(self, name: str, args: dict | None = None) -> None:
+        """Compatibilidad con WebJarvisOverlay: en Tk solo actualiza memoria."""
+        self.record_memory_tool_start(name, args or {})
+
+    def record_tool_end(self, name: str, elapsed_ms: float, ok: bool, response=None) -> None:
+        """Compatibilidad con WebJarvisOverlay: en Tk solo actualiza memoria."""
+        self.record_memory_tool_end(name, elapsed_ms, ok, response)
+
+    def record_audio_telemetry(self, payload: dict) -> None:
+        return None
+
+    def record_turn_latency(self, line: str) -> None:
+        return None
+
     @staticmethod
     def _is_memory_tool(name: str) -> bool:
         return name in {
