@@ -116,6 +116,12 @@ class JarvisOverlay:
         self._update_state_visual()
         self.log_event("Overlay listo")
 
+    # ---- Timer / scheduling ----
+
+    def after(self, delay_ms: int | float, fn: "Callable[[], None]") -> None:
+        """Delega root.after() — interfaz comun con WebJarvisOverlay.after()."""
+        self.root.after(int(delay_ms), fn)
+
     # ---- UI construction ----
 
     def _load_brand_assets(self) -> None:

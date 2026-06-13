@@ -1192,11 +1192,11 @@ class Jarvis:
                     if more_pending or drained >= self._UI_MAX_CALLBACKS_PER_PUMP
                     else self._UI_IDLE_POLL_MS
                 )
-                self.overlay.root.after(delay_ms, _pump)
+                self.overlay.after(delay_ms, _pump)
             except Exception:
                 pass
         try:
-            self.overlay.root.after(self._UI_ACTIVE_POLL_MS, _pump)
+            self.overlay.after(self._UI_ACTIVE_POLL_MS, _pump)
         except Exception:
             pass
 
@@ -1219,7 +1219,7 @@ class Jarvis:
         except Exception as exc:
             self._log(f"[WARN] flush telemetry fallo: {exc}")
         try:
-            self.overlay.root.after(USAGE_FLUSH_MS, self._schedule_usage_flush)
+            self.overlay.after(USAGE_FLUSH_MS, self._schedule_usage_flush)
         except Exception:
             pass
 
@@ -1235,7 +1235,7 @@ class Jarvis:
                     self._thinking_since_ms = None
                     self.overlay.set_state("idle" if self.mode == "PTT" else "listening")
                     self.overlay.append_output("\n[Jarvis: sigo escuchando; el turno anterior tardo mucho.]\n")
-            self.overlay.root.after(THINKING_WATCHDOG_MS, self._schedule_thinking_watchdog)
+            self.overlay.after(THINKING_WATCHDOG_MS, self._schedule_thinking_watchdog)
         except Exception:
             pass
 
