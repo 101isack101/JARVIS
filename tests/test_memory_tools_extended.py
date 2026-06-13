@@ -21,6 +21,21 @@ class FakeReasoner:
         return Response()
 
 
+class FakeCodeReasoner:
+    model = "gpt-5.5"
+    configured = True
+
+    def ask(self, prompt, context_extra=None, max_output_tokens=1600):
+        class Response:
+            text = f"code: {prompt}"
+            latency_ms = 22.5
+            cost_usd = 0.0
+            input_tokens = 11
+            output_tokens = 33
+
+        return Response()
+
+
 class FakeActions:
     def open_url(self, url=None):
         return {"executed": True, "allowed": True, "url": url or "about:blank"}
@@ -41,6 +56,7 @@ def test_dispatcher_exposes_claude_and_modes(tmp_path):
         vault=vault,
         rag=rag,
         reasoner=FakeReasoner(),
+        code_reasoner=FakeCodeReasoner(),
         actions=FakeActions(),
         modes=ModeManager(),
         obsidian_mcp=FakeObsidianMCP(),
@@ -48,16 +64,25 @@ def test_dispatcher_exposes_claude_and_modes(tmp_path):
     )
     dispatcher = ToolDispatcher(ctx)
 
+    code = dispatcher.call("ask_gpt55_code", {"prompt": "genera codigo"})
     deep = dispatcher.call("ask_claude_deep", {"prompt": "razona esto"})
     mode = dispatcher.call("jarvis_set_mode", {"mode": "debugging"})
+    agentic = dispatcher.call("jarvis_set_mode", {"mode": "agentic"})
     browser = dispatcher.call("jarvis_open_url", {})
     mcp = dispatcher.call("obsidian_mcp", {"operation": "create_folder", "path": "Projects/Jarvis"})
     security = dispatcher.call("jarvis_security_status", {})
 
     assert "jarvis_session_recall" in dispatcher.tool_names
+    assert "ask_gpt55_code" in dispatcher.tool_names
+    assert code["ok"] is True
+    assert code["model"] == "gpt-5.5"
+    assert "code:" in code["text"]
     assert deep["ok"] is True
     assert "deep:" in deep["text"]
     assert mode["changed"] is True
+    assert agentic["changed"] is True
+    assert agentic["mode"] == "agentic"
+    assert dispatcher.is_async("ask_gpt55_code") is True
     assert browser["executed"] is True
     assert browser["url"] == "about:blank"
     assert mcp["tool"] == "obsidian_create_folder"

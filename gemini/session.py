@@ -162,6 +162,7 @@ class JarvisSession:
         self._max_reconnects = 50  # plenty para una sesion larga
         self._submit_drop_warned = False
         self._go_away_requested = False
+        self._last_receive_error: BaseException | None = None
 
     # ---- Lifecycle ----
 
@@ -237,6 +238,16 @@ class JarvisSession:
                 had_error = True
                 self.cb.on_log(f"[ERROR] connect_once excepcion: {type(exc).__name__}: {exc}")
                 self.cb.on_error(exc)
+            if self._last_receive_error is not None:
+                had_error = True
+                exc = self._last_receive_error
+                self._last_receive_error = None
+                if self._is_invalid_resumption_error(exc):
+                    self.cb.on_log(
+                        "[WARN] error 1007/invalid argument en Live; "
+                        "descartando session_resumption_handle para reconectar limpio"
+                    )
+                    self._resumption_handle = None
 
             if self._stop_event.is_set():
                 break
@@ -272,6 +283,7 @@ class JarvisSession:
     async def _connect_once(self) -> None:
         """Una sesion completa: conecta, recibe hasta cierre, retorna."""
         self._go_away_requested = False
+        self._last_receive_error = None
         speech_config = types.SpeechConfig(
             voice_config=types.VoiceConfig(
                 prebuilt_voice_config=types.PrebuiltVoiceConfig(
@@ -387,7 +399,24 @@ class JarvisSession:
             raise
         except Exception as exc:
             self.cb.on_log(f"[ERROR] receive_loop excepcion tras {msg_count} mensajes: {type(exc).__name__}: {exc}")
+            self._last_receive_error = exc
             self.cb.on_error(exc)
+
+    @staticmethod
+    def _is_invalid_resumption_error(exc: BaseException) -> bool:
+        """True for Gemini Live state errors that should force a clean session.
+
+        In long sessions the server can close the socket with APIError 1007
+        ("Request contains an invalid argument" / "Precondition check failed").
+        Reusing the previous resumption handle then creates a reconnection loop.
+        """
+        text = f"{type(exc).__name__}: {exc}".lower()
+        return (
+            "1007" in text
+            or "invalid argument" in text
+            or "precondition check failed" in text
+            or "invalid frame payload" in text
+        )
 
     async def _handle_response(self, response, msg_count: int) -> str | None:
         """Procesa un mensaje Live.

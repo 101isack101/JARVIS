@@ -50,6 +50,7 @@ class ToolContext:
     rag: VaultRAG
     semantic_memory: Any | None = None
     reasoner: Any | None = None
+    code_reasoner: Any | None = None
     tracker: Any | None = None
     gate: Any | None = None
     screen: Any | None = None
@@ -206,9 +207,11 @@ JARVIS_LINK_DECL = types.FunctionDeclaration(
 ASK_CLAUDE_DEEP_DECL = types.FunctionDeclaration(
     name="ask_claude_deep",
     description=(
-        "Delegar a Claude cuando la tarea necesita razonamiento profundo: codigo, "
-        "arquitectura, debugging complejo, planning multi-paso o analisis largo. "
-        "NO usar para preguntas simples o charla; Jarvis debe responder directo ahi."
+        "Delegar a Claude cuando la tarea necesita razonamiento profundo general, "
+        "analisis largo o planning no centrado en codigo. Para codigo, debugging "
+        "de software, arquitectura tecnica o modo agentico usa primero "
+        "ask_gpt55_code. NO usar para preguntas simples o charla; Jarvis debe "
+        "responder directo ahi."
     ),
     parameters=types.Schema(
         type=types.Type.OBJECT,
@@ -224,6 +227,34 @@ ASK_CLAUDE_DEEP_DECL = types.FunctionDeclaration(
             "max_tokens": types.Schema(
                 type=types.Type.INTEGER,
                 description="Max tokens de respuesta. Default 450 (corto, para voz); subilo solo si Isaac pide algo extenso. Max 2048.",
+            ),
+        },
+        required=["prompt"],
+    ),
+)
+
+ASK_GPT55_CODE_DECL = types.FunctionDeclaration(
+    name="ask_gpt55_code",
+    description=(
+        "Delegar explicitamente a GPT 5.5 cuando la tarea sea generar codigo, "
+        "entrar en modo agentico, disenar una implementacion, depurar un bug de "
+        "software, crear scripts, refactorizar o planear cambios tecnicos. "
+        "Usar esta tool antes que ask_claude_deep para trabajo de codigo/agentico."
+    ),
+    parameters=types.Schema(
+        type=types.Type.OBJECT,
+        properties={
+            "prompt": types.Schema(
+                type=types.Type.STRING,
+                description="Tarea concreta para GPT 5.5.",
+            ),
+            "context_extra": types.Schema(
+                type=types.Type.STRING,
+                description="Contexto adicional opcional: archivos, error, objetivo, constraints.",
+            ),
+            "max_output_tokens": types.Schema(
+                type=types.Type.INTEGER,
+                description="Max tokens de salida. Default 1600; subir solo si Isaac pide codigo completo. Max 8192.",
             ),
         },
         required=["prompt"],
@@ -454,6 +485,136 @@ OBS_MEMORY_DECL = types.FunctionDeclaration(
     ),
 )
 
+FILE_ORGANIZER_DECL = types.FunctionDeclaration(
+    name="file_organizer",
+    description=(
+        "Organiza archivos locales de Isaac de forma segura, sin borrar ni "
+        "sobrescribir. Usa status para ver roots permitidos, scan para inspeccionar, "
+        "plan para crear un plan persistido de movimientos, preview para crear "
+        "una carpeta visible de vista previa sin mover originales, y apply para "
+        "aplicar un plan con aprobacion visual HITL. En modo dry-run apply no "
+        "mueve nada. Puede incluir carpetas/iconos del escritorio si include_folders=true. "
+        "No acepta shell libre."
+    ),
+    parameters=types.Schema(
+        type=types.Type.OBJECT,
+        properties={
+            "action": types.Schema(
+                type=types.Type.STRING,
+                description="Accion: status, scan, plan, preview, apply.",
+            ),
+            "root": types.Schema(
+                type=types.Type.STRING,
+                description="Root permitido para scan. Si se omite usa el primer root permitido.",
+            ),
+            "source_root": types.Schema(
+                type=types.Type.STRING,
+                description="Carpeta permitida de origen para crear un plan.",
+            ),
+            "target_root": types.Schema(
+                type=types.Type.STRING,
+                description="Carpeta permitida destino. Si se omite usa _Jarvis_Organized dentro del origen.",
+            ),
+            "recursive": types.Schema(
+                type=types.Type.BOOLEAN,
+                description="Si true inspecciona subcarpetas; default false.",
+            ),
+            "include_folders": types.Schema(
+                type=types.Type.BOOLEAN,
+                description=(
+                    "Si true incluye carpetas top-level como elementos movibles. "
+                    "Usalo para organizar iconos/carpetas del escritorio."
+                ),
+            ),
+            "limit": types.Schema(
+                type=types.Type.INTEGER,
+                description="Maximo de archivos a inspeccionar/planificar. Default 100, max 500.",
+            ),
+            "scheme": types.Schema(
+                type=types.Type.STRING,
+                description="Esquema de organizacion: by_type, by_extension, by_year_month.",
+            ),
+            "plan_id": types.Schema(
+                type=types.Type.STRING,
+                description="ID de plan a aplicar cuando action=apply.",
+            ),
+        },
+        required=["action"],
+    ),
+)
+
+DESKTOP_ICONS_DECL = types.FunctionDeclaration(
+    name="desktop_icons",
+    description=(
+        "Mueve visualmente la posicion de los iconos del escritorio de Windows. "
+        "Usala cuando Isaac pida mover/reacomodar fisicamente iconos en la pantalla "
+        "del escritorio. No mueve archivos a carpetas ni instalaciones; para eso usa "
+        "file_organizer. Requiere aprobacion HITL para arrange."
+    ),
+    parameters=types.Schema(
+        type=types.Type.OBJECT,
+        properties={
+            "action": types.Schema(
+                type=types.Type.STRING,
+                description="Accion: status, arrange.",
+            ),
+            "layout": types.Schema(
+                type=types.Type.STRING,
+                description="Layout: left, right, top. Default left.",
+            ),
+            "limit": types.Schema(
+                type=types.Type.INTEGER,
+                description="Maximo de iconos a reposicionar. Omitir para todos.",
+            ),
+            "start_x": types.Schema(
+                type=types.Type.INTEGER,
+                description="Coordenada X inicial en pixeles. Default 20.",
+            ),
+            "start_y": types.Schema(
+                type=types.Type.INTEGER,
+                description="Coordenada Y inicial en pixeles. Default 20.",
+            ),
+            "spacing_x": types.Schema(
+                type=types.Type.INTEGER,
+                description="Espaciado horizontal entre iconos. Default 120.",
+            ),
+            "spacing_y": types.Schema(
+                type=types.Type.INTEGER,
+                description="Espaciado vertical entre iconos. Default 95.",
+            ),
+            "columns": types.Schema(
+                type=types.Type.INTEGER,
+                description="Columnas para layout top. Opcional.",
+            ),
+        },
+        required=["action"],
+    ),
+)
+
+JARVIS_SKILL_DECL = types.FunctionDeclaration(
+    name="jarvis_skill",
+    description=(
+        "Gestiona skills runtime de Jarvis: perfiles operativos especializados "
+        "con instrucciones y tools recomendadas. Usala cuando Isaac pida activar "
+        "una capacidad/modo especializado, listar skills, o trabajar con una "
+        "tarea que encaja con una skill disponible."
+    ),
+    parameters=types.Schema(
+        type=types.Type.OBJECT,
+        properties={
+            "action": types.Schema(
+                type=types.Type.STRING,
+                description="Accion: list, get, activate, deactivate, status, reload.",
+            ),
+            "name": types.Schema(
+                type=types.Type.STRING,
+                description="Nombre de la skill para get/activate.",
+            ),
+        },
+        required=["action"],
+    ),
+)
+
 JARVIS_RUN_SAFE_COMMAND_DECL = types.FunctionDeclaration(
     name="jarvis_run_safe_command",
     description=(
@@ -528,8 +689,9 @@ JARVIS_OPEN_URL_DECL = types.FunctionDeclaration(
 JARVIS_SET_MODE_DECL = types.FunctionDeclaration(
     name="jarvis_set_mode",
     description=(
-        "Cambia el modo de trabajo de Jarvis: general, coding, debugging, "
-        "meeting, planning, study o english."
+        "Cambia el modo de trabajo de Jarvis: general, coding, agentic, "
+        "debugging, meeting, planning, study o english. Usa agentic cuando "
+        "Isaac pida modo agentico o trabajo multi-paso con herramientas."
     ),
     parameters=types.Schema(
         type=types.Type.OBJECT,
@@ -746,6 +908,7 @@ def all_function_declarations() -> list[types.FunctionDeclaration]:
         JARVIS_REMEMBER_DECL,
         JARVIS_BROWSE_DECL,
         JARVIS_LINK_DECL,
+        ASK_GPT55_CODE_DECL,
         ASK_CLAUDE_DEEP_DECL,
         SCREEN_LOOK_DECL,
         CAMERA_LOOK_DECL,
@@ -754,6 +917,9 @@ def all_function_declarations() -> list[types.FunctionDeclaration]:
         CHROME_READ_PAGE_DECL,
         STUDY_MODE_DECL,
         OBS_MEMORY_DECL,
+        FILE_ORGANIZER_DECL,
+        DESKTOP_ICONS_DECL,
+        JARVIS_SKILL_DECL,
         JARVIS_RUN_SAFE_COMMAND_DECL,
         JARVIS_OPEN_POWERSHELL_DECL,
         JARVIS_OPEN_URL_DECL,
@@ -1020,6 +1186,28 @@ def _format_claude_response(model: str, r) -> dict:
     }
 
 
+def _format_gpt55_code_response(model: str, r) -> dict:
+    return {
+        "ok": True,
+        "model": model,
+        "text": r.text,
+        "latency_ms": round(r.latency_ms),
+        "cost_usd": round(r.cost_usd, 6),
+        "tokens": {
+            "input": r.input_tokens,
+            "output": r.output_tokens,
+        },
+    }
+
+
+def _gpt55_code_preflight(ctx: ToolContext) -> dict | None:
+    if ctx.code_reasoner is None:
+        return {"ok": False, "error": "GPT55CodeReasoner no configurado"}
+    if hasattr(ctx.code_reasoner, "configured") and not ctx.code_reasoner.configured:
+        return {"ok": False, "error": "OPENAI_API_KEY no configurada"}
+    return None
+
+
 def _claude_preflight(ctx: ToolContext) -> dict | None:
     if ctx.reasoner is None:
         return {"ok": False, "error": "ClaudeReasoner no configurado"}
@@ -1054,6 +1242,51 @@ def ask_claude_deep(
     merged = _augmented_context(ctx, prompt, context_extra)
     r = ctx.reasoner.ask(prompt, context_extra=merged, max_tokens=max_tokens)
     return _format_claude_response(ctx.reasoner.model, r)
+
+
+def ask_gpt55_code(
+    ctx: ToolContext,
+    prompt: str,
+    context_extra: str | None = None,
+    max_output_tokens: int = 1600,
+) -> dict:
+    err = _gpt55_code_preflight(ctx)
+    if err is not None:
+        return err
+    max_output_tokens = max(256, min(int(max_output_tokens or 1600), 8192))
+    merged = _augmented_context(ctx, prompt, context_extra)
+    r = ctx.code_reasoner.ask(
+        prompt,
+        context_extra=merged,
+        max_output_tokens=max_output_tokens,
+    )
+    return _format_gpt55_code_response(ctx.code_reasoner.model, r)
+
+
+async def ask_gpt55_code_async(
+    ctx: ToolContext,
+    prompt: str,
+    context_extra: str | None = None,
+    max_output_tokens: int = 1600,
+) -> dict:
+    err = _gpt55_code_preflight(ctx)
+    if err is not None:
+        return err
+    max_output_tokens = max(256, min(int(max_output_tokens or 1600), 8192))
+    merged = _augmented_context(ctx, prompt, context_extra)
+    if hasattr(ctx.code_reasoner, "ask_async"):
+        r = await ctx.code_reasoner.ask_async(
+            prompt,
+            context_extra=merged,
+            max_output_tokens=max_output_tokens,
+        )
+    else:
+        r = ctx.code_reasoner.ask(
+            prompt,
+            context_extra=merged,
+            max_output_tokens=max_output_tokens,
+        )
+    return _format_gpt55_code_response(ctx.code_reasoner.model, r)
 
 
 async def ask_claude_deep_async(
@@ -1469,6 +1702,148 @@ def jarvis_run_safe_command(
     )
 
 
+_FILE_ORGANIZER = None
+
+
+def _get_file_organizer(ctx: ToolContext):
+    global _FILE_ORGANIZER
+    if _FILE_ORGANIZER is None:
+        from actions.file_organizer import FileOrganizer
+
+        state_dir = Path(__file__).resolve().parent.parent / "data" / "file_organizer"
+        _FILE_ORGANIZER = FileOrganizer(
+            state_dir=state_dir,
+            approval_broker=ctx.approvals,
+        )
+    return _FILE_ORGANIZER
+
+
+def file_organizer(
+    ctx: ToolContext,
+    action: str,
+    root: str | None = None,
+    source_root: str | None = None,
+    target_root: str | None = None,
+    recursive: bool = False,
+    include_folders: bool = False,
+    limit: int = 100,
+    scheme: str = "by_type",
+    plan_id: str | None = None,
+) -> dict:
+    organizer = _get_file_organizer(ctx)
+    op = (action or "").strip().lower()
+    if op == "status":
+        return organizer.status()
+    if op == "scan":
+        return organizer.scan(
+            root=root,
+            recursive=bool(recursive),
+            include_folders=bool(include_folders),
+            limit=int(limit or 100),
+        )
+    if op == "plan":
+        return organizer.plan(
+            source_root=source_root or root,
+            target_root=target_root,
+            recursive=bool(recursive),
+            include_folders=bool(include_folders),
+            limit=int(limit or 100),
+            scheme=scheme or "by_type",
+        )
+    if op == "preview":
+        return organizer.preview(plan_id or "")
+    if op == "apply":
+        return organizer.apply(plan_id or "")
+    return {
+        "ok": False,
+        "error": f"accion file_organizer invalida: {action}",
+        "valid_actions": ["status", "scan", "plan", "preview", "apply"],
+    }
+
+
+_DESKTOP_ICON_CONTROLLER = None
+
+
+def _get_desktop_icon_controller(ctx: ToolContext):
+    global _DESKTOP_ICON_CONTROLLER
+    if _DESKTOP_ICON_CONTROLLER is None:
+        from actions.desktop_icons import DesktopIconController
+
+        _DESKTOP_ICON_CONTROLLER = DesktopIconController(approval_broker=ctx.approvals)
+    return _DESKTOP_ICON_CONTROLLER
+
+
+def desktop_icons(
+    ctx: ToolContext,
+    action: str,
+    layout: str = "left",
+    limit: int | None = None,
+    start_x: int = 20,
+    start_y: int = 20,
+    spacing_x: int = 120,
+    spacing_y: int = 95,
+    columns: int | None = None,
+) -> dict:
+    controller = _get_desktop_icon_controller(ctx)
+    op = (action or "").strip().lower()
+    if op == "status":
+        return controller.status()
+    if op == "arrange":
+        return controller.arrange(
+            layout=layout or "left",
+            limit=limit,
+            start_x=int(start_x or 20),
+            start_y=int(start_y or 20),
+            spacing_x=int(spacing_x or 120),
+            spacing_y=int(spacing_y or 95),
+            columns=columns,
+        )
+    return {
+        "ok": False,
+        "error": f"accion desktop_icons invalida: {action}",
+        "valid_actions": ["status", "arrange"],
+    }
+
+
+_SKILL_REGISTRY = None
+
+
+def _get_skill_registry():
+    global _SKILL_REGISTRY
+    if _SKILL_REGISTRY is None:
+        from skills.registry import SkillRegistry
+
+        root = Path(__file__).resolve().parent.parent
+        _SKILL_REGISTRY = SkillRegistry(
+            skill_dir=root / "skills" / "local",
+            state_path=root / "data" / "skills" / "state.json",
+        )
+    return _SKILL_REGISTRY
+
+
+def jarvis_skill(action: str, name: str | None = None) -> dict:
+    registry = _get_skill_registry()
+    op = (action or "").strip().lower()
+    if op == "list":
+        return {"ok": True, "skills": registry.list()}
+    if op == "get":
+        return registry.get(name or "")
+    if op == "activate":
+        return registry.activate(name or "")
+    if op == "deactivate":
+        return registry.deactivate()
+    if op == "status":
+        return registry.status()
+    if op == "reload":
+        registry.reload()
+        return {"ok": True, "skills": registry.list()}
+    return {
+        "ok": False,
+        "error": f"accion jarvis_skill invalida: {action}",
+        "valid_actions": ["list", "get", "activate", "deactivate", "status", "reload"],
+    }
+
+
 def jarvis_open_url(ctx: ToolContext, url: str | None = None) -> dict:
     if ctx.actions is None:
         return {"executed": False, "error": "SafeActionExecutor no configurado"}
@@ -1585,6 +1960,10 @@ def jarvis_security_status(ctx: ToolContext) -> dict:
     action_root = str(getattr(ctx.actions, "root", "")) if ctx.actions is not None else None
     vault_root = str(getattr(ctx.vault, "vault_path", ""))
     delete_enabled = os.environ.get("JARVIS_OBSIDIAN_MCP_ALLOW_DELETE", "false").lower() == "true"
+    try:
+        organizer_status = _get_file_organizer(ctx).status()
+    except Exception as exc:
+        organizer_status = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
     return {
         "ok": True,
         "summary": "Politicas de seguridad activas en backend Python, no solo en prompt.",
@@ -1593,6 +1972,7 @@ def jarvis_security_status(ctx: ToolContext) -> dict:
             "applies_to": [
                 "abrir terminales",
                 "acciones sensibles no expuestas como operaciones read-only",
+                "aplicar planes de organizacion de archivos locales",
                 "operaciones MCP de escritura en Obsidian",
                 "borrado Obsidian cuando la env var lo permite",
             ],
@@ -1604,6 +1984,7 @@ def jarvis_security_status(ctx: ToolContext) -> dict:
             "path_validation": "Path.resolve() + relative_to(root)",
             "command_interface": "operaciones read-only estructuradas; PowerShell libre no expuesto a Gemini",
         },
+        "file_organizer": organizer_status,
         "secret_filter": {
             "enabled": True,
             "blocked_filenames": sorted(SECRET_FILENAMES),
@@ -1867,6 +2248,7 @@ class ToolDispatcher:
             "jarvis_remember": lambda **kw: jarvis_remember(ctx, **kw),
             "jarvis_browse": lambda **kw: jarvis_browse(ctx, **kw),
             "jarvis_link": lambda **kw: jarvis_link(ctx, **kw),
+            "ask_gpt55_code": lambda **kw: ask_gpt55_code(ctx, **kw),
             "ask_claude_deep": lambda **kw: ask_claude_deep(ctx, **kw),
             "screen_look": lambda **kw: screen_look(ctx, **kw),
             "camera_look": lambda **kw: camera_look(ctx, **kw),
@@ -1875,6 +2257,9 @@ class ToolDispatcher:
             "chrome_read_page": lambda **kw: chrome_read_page(**kw),
             "study_mode": lambda **kw: study_mode(ctx, **kw),
             "obs_memory": lambda **kw: obs_memory(ctx, **kw),
+            "file_organizer": lambda **kw: file_organizer(ctx, **kw),
+            "desktop_icons": lambda **kw: desktop_icons(ctx, **kw),
+            "jarvis_skill": lambda **kw: jarvis_skill(**kw),
             "jarvis_run_safe_command": lambda **kw: jarvis_run_safe_command(ctx, **kw),
             "jarvis_open_powershell": lambda **kw: jarvis_open_powershell(ctx, **kw),
             "jarvis_open_url": lambda **kw: jarvis_open_url(ctx, **kw),
@@ -1894,6 +2279,7 @@ class ToolDispatcher:
         # El dispatcher async las invoca directamente sobre el event loop
         # para que asyncio.wait_for las cancele de verdad cuando expira.
         self._async_tools: dict[str, Callable[..., Any]] = {
+            "ask_gpt55_code": lambda **kw: ask_gpt55_code_async(ctx, **kw),
             "ask_claude_deep": lambda **kw: ask_claude_deep_async(ctx, **kw),
         }
 

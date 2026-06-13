@@ -144,6 +144,40 @@ class SafeActionExecutor:
             return False
         return any(normalized == p.strip() or normalized.startswith(p) for p in READ_ONLY_PREFIXES)
 
+    def _readonly_path_guard(self, command: str) -> str | None:
+        """Valida que ningun argumento tipo path de un comando readonly escape
+        del root ni apunte a un archivo sensible.
+
+        El fast-path readonly (get-content, dir, select-string...) ejecutaba sin
+        validar las rutas de sus argumentos: solo se comprobaba el cwd. Eso permitia
+        leer fuera del proyecto (`.ssh/id_rsa`, `.env` ajenos) y devolverlo al LLM.
+        Aqui replicamos la contencion que `run_structured` ya aplica via
+        `_resolve_safe_path`, para que el prompt no sea la unica barrera.
+        """
+        for token in command.strip().split():
+            t = token.strip().strip("\"'")
+            if not t or t.startswith("-"):
+                continue  # flags (-Path, -First...) no son rutas
+            if is_secret_path(t):
+                return f"argumento sensible: {t}"
+            if t.startswith("~"):
+                return f"ruta fuera del root (home): {t}"
+            looks_path = (
+                ".." in t
+                or "/" in t
+                or "\\" in t
+                or (len(t) >= 2 and t[1] == ":")  # unidad estilo C:
+            )
+            if looks_path:
+                candidate = Path(t)
+                if not candidate.is_absolute():
+                    candidate = self.root / candidate
+                try:
+                    assert_inside_root(candidate, self.root, label="argumento")
+                except SecurityError:
+                    return f"ruta fuera del root: {t}"
+        return None
+
     def _hard_block_reason(self, command: str) -> str | None:
         normalized = self._normalize_command(command)
         if any(tok in normalized for tok in HARD_BLOCKED_TOKENS):
@@ -335,6 +369,17 @@ class SafeActionExecutor:
             ).as_dict()
 
         readonly = self._is_allowed_readonly(command)
+        if readonly:
+            path_violation = self._readonly_path_guard(command)
+            if path_violation:
+                return ActionResult(
+                    executed=False,
+                    allowed=False,
+                    mode=self.mode,
+                    command=command,
+                    cwd=str(workdir),
+                    error=f"comando bloqueado: {path_violation}",
+                ).as_dict()
         if not readonly:
             risk = self._risk_for(command)
             if not self._request_approval(risk, command, workdir):

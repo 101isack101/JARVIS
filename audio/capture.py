@@ -20,6 +20,10 @@ from typing import Callable
 import numpy as np
 import sounddevice as sd
 
+from telemetry.logger import get_logger
+
+log = get_logger("audio.capture")
+
 GEMINI_INPUT_RATE = 16000   # Gemini Live espera 16kHz mono int16
 CHANNELS = 1
 DTYPE = "int16"
@@ -55,7 +59,7 @@ class AudioCapture:
 
     def _callback(self, indata: np.ndarray, _frames: int, _time_info, status) -> None:
         if status:
-            print(f"[capture] status: {status}")
+            log.warning("[capture] status del stream: {}", status)
         with self._lock:
             if not self._recording:
                 return
@@ -65,7 +69,7 @@ class AudioCapture:
         except queue.Full:
             self._dropped_chunks += 1
             if self._dropped_chunks == 1 or self._dropped_chunks % 50 == 0:
-                print(f"[capture] queue llena, chunks descartados={self._dropped_chunks}")
+                log.warning("[capture] queue llena, chunks descartados={}", self._dropped_chunks)
 
     def start(self) -> None:
         if self._stream is not None:
@@ -94,7 +98,7 @@ class AudioCapture:
             try:
                 self._on_chunk(pcm_bytes)
             except Exception as exc:
-                print(f"[capture] on_chunk fallo: {exc}")
+                log.error("[capture] on_chunk fallo en worker thread: {}", exc)
 
     def start_recording(self) -> None:
         with self._lock:

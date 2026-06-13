@@ -9,6 +9,7 @@
 # Core backbones
 google-genai>=0.8.0,<2.0
 anthropic>=0.40.0,<1.0
+openai>=1.99.0,<3.0
 python-dotenv>=1.0.1,<2.0
 
 # Audio I/O

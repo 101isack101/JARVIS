@@ -60,6 +60,7 @@ from memory.session_summary import (
 )
 from memory.tools import ToolContext, ToolDispatcher, make_tool_object
 from overlay.ui_thread import UiThread
+from openai_code.reasoner import GPT55CodeReasoner
 from proactivity.config import ProactivityConfig
 from proactivity.engine import ProactivityEngine
 from mcp_obsidian.client import ObsidianMCPClient
@@ -70,6 +71,7 @@ from runtime_modes import ModeManager
 from runtime_preferences import ensure_runtime_preferences, preferences_prompt_block
 from security.approvals import ApprovalBroker
 from security.kill_switch import hard_exit
+from skills.registry import active_skill_prompt_block
 from telemetry.budgets import BudgetGate
 from telemetry.latency import LatencyTracker
 from telemetry.logger import configure_logger, get_logger
@@ -236,6 +238,7 @@ TOOL_HINTS: dict[str, str] = {
     "jarvis_browse": "Listando notas...",
     "jarvis_remember": "Guardando en tu vault...",
     "obsidian_mcp": "Operando en Obsidian...",
+    "ask_gpt55_code": "Consultando GPT 5.5...",
     "jarvis_run_safe_command": "Ejecutando comando...",
     "spotify_control": "Controlando Spotify...",
 }
@@ -245,6 +248,7 @@ TOOL_HINTS: dict[str, str] = {
 # real, y como ahora cancela la HTTP de verdad (ask_async), no hay budget
 # desperdiciado si en algun caso se pasa.
 TOOL_TIMEOUTS_S: dict[str, float] = {
+    "ask_gpt55_code": 60.0,
     "ask_claude_deep": 30.0,
     "study_mode": 60.0,
     "obs_memory": 900.0,
@@ -343,6 +347,7 @@ class Jarvis:
         self.camera = CameraCapture(ROOT / "data" / "camera")
         self.preferences = ensure_runtime_preferences(ROOT / "data" / "preferences.json")
         self.reasoner = self._build_reasoner()
+        self.code_reasoner = self._build_code_reasoner()
         self.obsidian_mcp = ObsidianMCPClient(python_exe=sys.executable, cwd=ROOT)
 
         # Memoria Obsidian
@@ -450,6 +455,17 @@ class Jarvis:
         except Exception as exc:
             log.warning(f"[WARN] proactividad (arranque) falló: {exc}")
 
+        skill_block = ""
+        try:
+            skill_block = active_skill_prompt_block(
+                skill_dir=ROOT / "skills" / "local",
+                state_path=ROOT / "data" / "skills" / "state.json",
+            )
+            if skill_block:
+                log.info("Skill activa inyectada al system_prompt.")
+        except Exception as exc:
+            log.warning(f"[WARN] skill activa no pudo inyectarse: {exc}")
+
         self.obs_memory = OBSMemoryController(
             vault=self.vault,
             reasoner=self.reasoner,
@@ -460,6 +476,7 @@ class Jarvis:
             rag=self.rag,
             semantic_memory=self.semantic_memory,
             reasoner=self.reasoner,
+            code_reasoner=self.code_reasoner,
             tracker=self.tracker,
             gate=self.gate,
             screen=self.screen,
@@ -548,6 +565,7 @@ class Jarvis:
                     + preferences_prompt_block(self.preferences)
                     + (("\n\n" + recall_block) if recall_block else "")
                     + (("\n\n" + briefing_block) if briefing_block else "")
+                    + (("\n\n" + skill_block) if skill_block else "")
                 ),
                 manual_activity_mode=True,
                 enable_input_transcription=True,
@@ -1242,6 +1260,16 @@ class Jarvis:
             return ClaudeReasoner(tracker=self.tracker)
         except Exception as exc:
             self._log(f"[WARN] ClaudeReasoner no disponible: {type(exc).__name__}: {exc}")
+            return None
+
+    def _build_code_reasoner(self) -> GPT55CodeReasoner | None:
+        if not os.environ.get("OPENAI_API_KEY"):
+            self._log("OPENAI_API_KEY no configurada; ask_gpt55_code queda desactivada")
+            return None
+        try:
+            return GPT55CodeReasoner(tracker=self.tracker)
+        except Exception as exc:
+            self._log(f"[WARN] GPT55CodeReasoner no disponible: {type(exc).__name__}: {exc}")
             return None
 
     def _ensure_libre_models(self) -> None:

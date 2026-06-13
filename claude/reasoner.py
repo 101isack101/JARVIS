@@ -29,6 +29,9 @@ from anthropic import (
 )
 
 from telemetry.tracker import TokenTracker
+from telemetry.logger import get_logger
+
+log = get_logger("reasoner")
 
 DEFAULT_MODEL = "claude-sonnet-4-6"
 DEFAULT_MAX_TOKENS = 1024
@@ -154,7 +157,7 @@ class ClaudeReasoner:
                 status = getattr(e, "status_code", None)
                 if isinstance(e, RateLimitError) or (status and status >= 500):
                     delay = 1.5 ** attempt
-                    print(f"[reasoner] retry {attempt + 1}/{MAX_RETRIES} en {delay:.1f}s: {type(e).__name__}")
+                    log.warning("[reasoner] retry {}/{} en {:.1f}s: {}", attempt + 1, MAX_RETRIES, delay, type(e).__name__)
                     time.sleep(delay)
                     continue
                 raise
@@ -230,7 +233,7 @@ class ClaudeReasoner:
                 status = getattr(e, "status_code", None)
                 if isinstance(e, RateLimitError) or (status and status >= 500):
                     delay = 1.5 ** attempt
-                    print(f"[reasoner] retry async {attempt + 1}/{MAX_RETRIES} en {delay:.1f}s: {type(e).__name__}")
+                    log.warning("[reasoner] retry async {}/{} en {:.1f}s: {}", attempt + 1, MAX_RETRIES, delay, type(e).__name__)
                     await asyncio.sleep(delay)
                     continue
                 raise
