@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import urlparse
 
-from security.policy import SecurityError, assert_inside_root
+from security.policy import SecurityError, assert_inside_root, is_secret_path
 
 
 READ_ONLY_PREFIXES = (
@@ -119,6 +119,16 @@ class SafeActionExecutor:
         except SecurityError:
             return False
 
+    def _resolve_safe_path(self, path: str | None, *, label: str = "path") -> Path:
+        raw = (path or ".").strip() or "."
+        candidate = Path(raw)
+        if not candidate.is_absolute():
+            candidate = self.root / candidate
+        resolved = assert_inside_root(candidate, self.root, label=label)
+        if is_secret_path(resolved):
+            raise SecurityError(f"{label} sensible bloqueado: {resolved}")
+        return resolved
+
     def _normalize_command(self, command: str) -> str:
         return " ".join(command.strip().lower().split())
 
@@ -133,6 +143,40 @@ class SafeActionExecutor:
         if any(tok in normalized for tok in RISKY_TOKENS):
             return False
         return any(normalized == p.strip() or normalized.startswith(p) for p in READ_ONLY_PREFIXES)
+
+    def _readonly_path_guard(self, command: str) -> str | None:
+        """Valida que ningun argumento tipo path de un comando readonly escape
+        del root ni apunte a un archivo sensible.
+
+        El fast-path readonly (get-content, dir, select-string...) ejecutaba sin
+        validar las rutas de sus argumentos: solo se comprobaba el cwd. Eso permitia
+        leer fuera del proyecto (`.ssh/id_rsa`, `.env` ajenos) y devolverlo al LLM.
+        Aqui replicamos la contencion que `run_structured` ya aplica via
+        `_resolve_safe_path`, para que el prompt no sea la unica barrera.
+        """
+        for token in command.strip().split():
+            t = token.strip().strip("\"'")
+            if not t or t.startswith("-"):
+                continue  # flags (-Path, -First...) no son rutas
+            if is_secret_path(t):
+                return f"argumento sensible: {t}"
+            if t.startswith("~"):
+                return f"ruta fuera del root (home): {t}"
+            looks_path = (
+                ".." in t
+                or "/" in t
+                or "\\" in t
+                or (len(t) >= 2 and t[1] == ":")  # unidad estilo C:
+            )
+            if looks_path:
+                candidate = Path(t)
+                if not candidate.is_absolute():
+                    candidate = self.root / candidate
+                try:
+                    assert_inside_root(candidate, self.root, label="argumento")
+                except SecurityError:
+                    return f"ruta fuera del root: {t}"
+        return None
 
     def _hard_block_reason(self, command: str) -> str | None:
         normalized = self._normalize_command(command)
@@ -186,6 +230,120 @@ class SafeActionExecutor:
         )
         return head + marker + tail
 
+    def run_structured(
+        self,
+        operation: str,
+        *,
+        path: str | None = None,
+        query: str | None = None,
+        max_chars: int | None = None,
+        limit: int | None = None,
+    ) -> dict:
+        """Ejecuta operaciones read-only sin aceptar shell libre del modelo."""
+        op = (operation or "").strip().lower()
+        max_chars = max(200, min(int(max_chars or self.max_output_chars), 20000))
+        limit = max(1, min(int(limit or 100), 500))
+
+        try:
+            if op == "list_dir":
+                target = self._resolve_safe_path(path, label="path")
+                if not target.exists():
+                    return {"ok": False, "allowed": True, "operation": op, "error": f"no existe: {target}"}
+                if not target.is_dir():
+                    return {"ok": False, "allowed": True, "operation": op, "error": f"no es directorio: {target}"}
+                items = []
+                for child in sorted(target.iterdir(), key=lambda p: (not p.is_dir(), p.name.lower()))[:limit]:
+                    if is_secret_path(child):
+                        continue
+                    rel = str(child.relative_to(self.root))
+                    items.append({
+                        "path": rel,
+                        "name": child.name,
+                        "type": "dir" if child.is_dir() else "file",
+                        "size": child.stat().st_size if child.is_file() else None,
+                    })
+                return {"ok": True, "allowed": True, "operation": op, "path": str(target), "items": items}
+
+            if op == "read_file":
+                target = self._resolve_safe_path(path, label="path")
+                if not target.exists():
+                    return {"ok": False, "allowed": True, "operation": op, "error": f"no existe: {target}"}
+                if not target.is_file():
+                    return {"ok": False, "allowed": True, "operation": op, "error": f"no es archivo: {target}"}
+                text = target.read_text(encoding="utf-8", errors="replace")
+                clipped = self._clip_output(text[:max_chars + 1], "file")
+                return {
+                    "ok": True,
+                    "allowed": True,
+                    "operation": op,
+                    "path": str(target.relative_to(self.root)),
+                    "content": clipped[:max_chars],
+                    "truncated": len(text) > max_chars,
+                }
+
+            if op == "search_text":
+                needle = (query or "").strip()
+                if not needle:
+                    return {"ok": False, "allowed": True, "operation": op, "error": "query requerido"}
+                target = self._resolve_safe_path(path, label="path")
+                files = [target] if target.is_file() else target.rglob("*")
+                matches = []
+                lowered = needle.lower()
+                for file_path in files:
+                    if len(matches) >= limit:
+                        break
+                    if not file_path.is_file() or is_secret_path(file_path):
+                        continue
+                    try:
+                        for lineno, line in enumerate(file_path.read_text(encoding="utf-8", errors="replace").splitlines(), start=1):
+                            if lowered in line.lower():
+                                matches.append({
+                                    "path": str(file_path.relative_to(self.root)),
+                                    "line": lineno,
+                                    "text": line[:300],
+                                })
+                                if len(matches) >= limit:
+                                    break
+                    except Exception:
+                        continue
+                return {"ok": True, "allowed": True, "operation": op, "query": needle, "matches": matches}
+
+            if op in {"git_status", "git_diff_stat", "git_log"}:
+                args_by_op = {
+                    "git_status": ["git", "status", "--short"],
+                    "git_diff_stat": ["git", "diff", "--stat"],
+                    "git_log": ["git", "log", "--oneline", "-n", str(min(limit, 50))],
+                }
+                proc = subprocess.run(
+                    args_by_op[op],
+                    cwd=str(self.root),
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    timeout=self.timeout_s,
+                )
+                return {
+                    "ok": proc.returncode == 0,
+                    "allowed": True,
+                    "operation": op,
+                    "returncode": proc.returncode,
+                    "stdout": self._clip_output(proc.stdout, "stdout"),
+                    "stderr": self._clip_output(proc.stderr, "stderr"),
+                }
+
+            return {
+                "ok": False,
+                "allowed": False,
+                "operation": op,
+                "error": "operacion no permitida",
+                "valid_operations": ["list_dir", "read_file", "search_text", "git_status", "git_diff_stat", "git_log"],
+            }
+        except SecurityError as exc:
+            return {"ok": False, "allowed": False, "operation": op, "error": str(exc)}
+        except Exception as exc:
+            return {"ok": False, "allowed": True, "operation": op, "error": f"{type(exc).__name__}: {exc}"}
+
     def run_powershell(self, command: str, cwd: str | None = None) -> dict:
         workdir = (Path(cwd) if cwd else self.root).resolve()
         if not self._inside_root(workdir):
@@ -211,6 +369,17 @@ class SafeActionExecutor:
             ).as_dict()
 
         readonly = self._is_allowed_readonly(command)
+        if readonly:
+            path_violation = self._readonly_path_guard(command)
+            if path_violation:
+                return ActionResult(
+                    executed=False,
+                    allowed=False,
+                    mode=self.mode,
+                    command=command,
+                    cwd=str(workdir),
+                    error=f"comando bloqueado: {path_violation}",
+                ).as_dict()
         if not readonly:
             risk = self._risk_for(command)
             if not self._request_approval(risk, command, workdir):

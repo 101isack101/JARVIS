@@ -1,7 +1,7 @@
 import asyncio
 from types import SimpleNamespace
 
-from gemini.session import JarvisSession, SessionCallbacks, SessionConfig
+from gemini.session import JarvisSession, SessionCallbacks, SessionConfig, _call_compatible
 
 
 def _turn_complete_response():
@@ -46,6 +46,15 @@ class FakeLiveSession:
         return gen()
 
 
+class FakeFailingLiveSession:
+    def receive(self):
+        async def gen():
+            raise RuntimeError("APIError: 1007 None. Request contains an invalid argument.")
+            yield  # pragma: no cover
+
+        return gen()
+
+
 def test_receive_loop_keeps_connection_alive_after_turn_complete():
     async def run():
         logs = []
@@ -63,6 +72,42 @@ def test_receive_loop_keeps_connection_alive_after_turn_complete():
         assert not any("sesion cerrada por servidor" in line for line in logs)
 
     asyncio.run(run())
+
+
+def test_receive_loop_records_invalid_argument_error():
+    async def run():
+        logs = []
+        errors = []
+        session = JarvisSession(
+            SessionConfig(api_key="test-key"),
+            SessionCallbacks(on_log=logs.append, on_error=errors.append),
+        )
+        session._session = FakeFailingLiveSession()
+        session._stop_event = asyncio.Event()
+
+        await session._receive_loop()
+
+        assert session._last_receive_error is not None
+        assert session._is_invalid_resumption_error(session._last_receive_error)
+        assert errors
+        assert any("receive_loop excepcion" in line for line in logs)
+
+    asyncio.run(run())
+
+
+def test_invalid_resumption_error_classifier_matches_gemini_1007():
+    session = JarvisSession(
+        SessionConfig(api_key="test-key"),
+        SessionCallbacks(),
+    )
+
+    assert session._is_invalid_resumption_error(
+        RuntimeError("APIError: 1007 None. Precondition check failed.")
+    )
+    assert session._is_invalid_resumption_error(
+        RuntimeError("ConnectionClosedError: invalid frame payload data")
+    )
+    assert not session._is_invalid_resumption_error(RuntimeError("temporary network timeout"))
 
 
 def test_receive_loop_reconnects_cleanly_on_go_away():
@@ -101,3 +146,21 @@ def test_submit_closes_coroutine_when_loop_not_ready():
     session._submit(coro)
 
     assert coro.cr_frame is None
+
+
+def test_tool_callbacks_remain_backward_compatible():
+    calls = []
+
+    def old_start(name):
+        calls.append(("start", name))
+
+    def old_end(name, elapsed_ms, ok):
+        calls.append(("end", name, elapsed_ms, ok))
+
+    _call_compatible(old_start, "jarvis_recall", {"query": "secret-ish content"})
+    _call_compatible(old_end, "jarvis_recall", 12.5, True, {"found": 2})
+
+    assert calls == [
+        ("start", "jarvis_recall"),
+        ("end", "jarvis_recall", 12.5, True),
+    ]

@@ -1,8 +1,9 @@
 """
-memory/tools.py - 4 tools de memoria expuestas a Gemini Live como functions.
+memory/tools.py - Tools de memoria expuestas a Gemini Live como functions.
 
 Jarvis decide AUTONOMAMENTE cuando llamarlas:
   - jarvis_recall(query, top_k)             -> antes de responder, si necesita contexto
+  - jarvis_session_recall(query, when)      -> continuidad temporal entre sesiones
   - jarvis_remember(title, content, tags)   -> despues de un turno con info durable
   - jarvis_browse(folder, limit)            -> cuando le piden 'que hay sobre X'
   - jarvis_link(note_from, note_to)         -> cuando descubre relacion entre notas
@@ -19,6 +20,7 @@ from __future__ import annotations
 import os
 import re
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
@@ -27,8 +29,11 @@ from google.genai import types
 from security.policy import SECRET_FILENAMES, SECRET_SUFFIXES
 
 from . import notes as notes_mod
+from .context_assembler import build_project_context
 from .obsidian_vault import ObsidianVault, VaultError
 from .rag import VaultRAG
+from .session_summary import search_session_summaries
+from .triage import triage_memory, update_project_memory_card
 
 
 @dataclass
@@ -43,14 +48,26 @@ class ToolContext:
 
     vault: ObsidianVault
     rag: VaultRAG
+    semantic_memory: Any | None = None
     reasoner: Any | None = None
+    code_reasoner: Any | None = None
     tracker: Any | None = None
     gate: Any | None = None
     screen: Any | None = None
+    camera: Any | None = None
+    camera_watch: Any | None = None
+    genai_client: Any | None = None
+    on_focus_box: Callable[..., None] | None = None
     actions: Any | None = None
     modes: Any | None = None
     obsidian_mcp: Any | None = None
+    obs_memory: Any | None = None
     approvals: Any | None = None
+    # Callback inyectado por Jarvis para cambiar el modo de ESCUCHA (PTT/LIBRE)
+    # por voz. Firma: (target: str) -> dict. None si no esta disponible.
+    set_listen_mode: Callable[..., dict] | None = None
+    # Motor de proactividad (Fase 3). None si la feature está deshabilitada.
+    proactivity: Any | None = None
 
 
 # =====================================================================
@@ -80,6 +97,34 @@ JARVIS_RECALL_DECL = types.FunctionDeclaration(
             ),
         },
         required=["query"],
+    ),
+)
+
+JARVIS_SESSION_RECALL_DECL = types.FunctionDeclaration(
+    name="jarvis_session_recall",
+    description=(
+        "Recupera memorias de sesiones recientes ya sintetizadas. USALA cuando "
+        "Isaac diga 'ayer', 'anoche', 'la sesion pasada', 'la vez anterior', "
+        "'la conversacion que tuvimos', 'que hablamos' o cualquier referencia "
+        "temporal a conversaciones previas. Es mas directa que jarvis_recall "
+        "para continuidad entre sesiones y no llama a Claude."
+    ),
+    parameters=types.Schema(
+        type=types.Type.OBJECT,
+        properties={
+            "query": types.Schema(
+                type=types.Type.STRING,
+                description="Tema o frase a buscar dentro de los resumenes de sesiones.",
+            ),
+            "when": types.Schema(
+                type=types.Type.STRING,
+                description="Referencia temporal: ayer, anoche, hoy, anteayer, YYYY-MM-DD o DD/MM/YYYY.",
+            ),
+            "limit": types.Schema(
+                type=types.Type.INTEGER,
+                description="Cantidad maxima de sesiones a devolver. Default 5, max 10.",
+            ),
+        },
     ),
 )
 
@@ -162,9 +207,11 @@ JARVIS_LINK_DECL = types.FunctionDeclaration(
 ASK_CLAUDE_DEEP_DECL = types.FunctionDeclaration(
     name="ask_claude_deep",
     description=(
-        "Delegar a Claude cuando la tarea necesita razonamiento profundo: codigo, "
-        "arquitectura, debugging complejo, planning multi-paso o analisis largo. "
-        "NO usar para preguntas simples o charla; Jarvis debe responder directo ahi."
+        "Delegar a Claude cuando la tarea necesita razonamiento profundo general, "
+        "analisis largo o planning no centrado en codigo. Para codigo, debugging "
+        "de software, arquitectura tecnica o modo agentico usa primero "
+        "ask_gpt55_code. NO usar para preguntas simples o charla; Jarvis debe "
+        "responder directo ahi."
     ),
     parameters=types.Schema(
         type=types.Type.OBJECT,
@@ -179,7 +226,35 @@ ASK_CLAUDE_DEEP_DECL = types.FunctionDeclaration(
             ),
             "max_tokens": types.Schema(
                 type=types.Type.INTEGER,
-                description="Max tokens de respuesta. Default 1024, max 2048.",
+                description="Max tokens de respuesta. Default 450 (corto, para voz); subilo solo si Isaac pide algo extenso. Max 2048.",
+            ),
+        },
+        required=["prompt"],
+    ),
+)
+
+ASK_GPT55_CODE_DECL = types.FunctionDeclaration(
+    name="ask_gpt55_code",
+    description=(
+        "Delegar explicitamente a GPT 5.5 cuando la tarea sea generar codigo, "
+        "entrar en modo agentico, disenar una implementacion, depurar un bug de "
+        "software, crear scripts, refactorizar o planear cambios tecnicos. "
+        "Usar esta tool antes que ask_claude_deep para trabajo de codigo/agentico."
+    ),
+    parameters=types.Schema(
+        type=types.Type.OBJECT,
+        properties={
+            "prompt": types.Schema(
+                type=types.Type.STRING,
+                description="Tarea concreta para GPT 5.5.",
+            ),
+            "context_extra": types.Schema(
+                type=types.Type.STRING,
+                description="Contexto adicional opcional: archivos, error, objetivo, constraints.",
+            ),
+            "max_output_tokens": types.Schema(
+                type=types.Type.INTEGER,
+                description="Max tokens de salida. Default 1600; subir solo si Isaac pide codigo completo. Max 8192.",
             ),
         },
         required=["prompt"],
@@ -204,6 +279,74 @@ SCREEN_LOOK_DECL = types.FunctionDeclaration(
             "reason": types.Schema(
                 type=types.Type.STRING,
                 description="Motivo breve de la captura.",
+            ),
+        },
+    ),
+)
+
+CAMERA_LOOK_DECL = types.FunctionDeclaration(
+    name="camera_look",
+    description=(
+        "Captura UNA foto de la camara frontal de Isaac y te la entrega para que "
+        "describas o analices lo que te esta mostrando frente a la camara: un objeto, "
+        "una placa o componente FPV/electronica, una nota en papel, la pantalla de un "
+        "multimetro o cargador, etc. Usala cuando Isaac diga 'mira esto', 'que es esto', "
+        "'mira lo que tengo', 'fijate en este objeto' o senale algo fisico. Para ver en "
+        "continuo mientras trabaja, usa camera_watch. No leas datos sensibles salvo que "
+        "Isaac lo pida explicitamente en el mismo turno."
+    ),
+    parameters=types.Schema(
+        type=types.Type.OBJECT,
+        properties={
+            "reason": types.Schema(
+                type=types.Type.STRING,
+                description="Motivo breve de la captura.",
+            ),
+        },
+    ),
+)
+
+CAMERA_WATCH_DECL = types.FunctionDeclaration(
+    name="camera_watch",
+    description=(
+        "Activa o desactiva el MODO VISION: JARVIS ve en continuo por la camara "
+        "frontal mientras Isaac trabaja o le muestra algo en movimiento. Usa "
+        "action='start' cuando Isaac diga 'modo vision', 'mira lo que hago', "
+        "'guiame con esto', 'observa mientras...'. Usa action='stop' cuando diga "
+        "'ya', 'salir de modo vision', 'deja de mirar', 'listo'. El modo se apaga "
+        "solo tras unos segundos por seguridad. Para una sola foto usa camera_look."
+    ),
+    parameters=types.Schema(
+        type=types.Type.OBJECT,
+        properties={
+            "action": types.Schema(
+                type=types.Type.STRING,
+                description="start para activar, stop para desactivar.",
+            ),
+            "duration_s": types.Schema(
+                type=types.Type.NUMBER,
+                description="Segundos de observacion al iniciar (default 90, max 180).",
+            ),
+        },
+        required=["action"],
+    ),
+)
+
+CAMERA_FOCUS_DECL = types.FunctionDeclaration(
+    name="camera_focus",
+    description=(
+        "Marca con un crosshair el objeto principal que Isaac te esta mostrando por "
+        "la camara y dibuja un recuadro sobre el en el preview. Usala cuando Isaac "
+        "diga 'enfoca esto', 'que es esto exactamente', 'senala lo que ves', "
+        "'marca el objeto'. Requiere que haya una captura reciente (camera_look o "
+        "modo vision activo)."
+    ),
+    parameters=types.Schema(
+        type=types.Type.OBJECT,
+        properties={
+            "label": types.Schema(
+                type=types.Type.STRING,
+                description="Pista opcional de que objeto enfocar.",
             ),
         },
     ),
@@ -300,27 +443,210 @@ STUDY_MODE_DECL = types.FunctionDeclaration(
     ),
 )
 
-JARVIS_RUN_SAFE_COMMAND_DECL = types.FunctionDeclaration(
-    name="jarvis_run_safe_command",
+OBS_MEMORY_DECL = types.FunctionDeclaration(
+    name="obs_memory",
     description=(
-        "Ejecuta o simula un comando PowerShell read-only dentro del proyecto Jarvis. "
-        "Respeta JARVIS_MODE: en dev hace dry-run; en prod solo comandos allowlist. "
-        "Nunca usar para SendKeys, WScript.Shell, COM automation, teclado/mouse "
-        "simulado ni abrir terminales."
+        "Controla OBS Studio por WebSocket y convierte grabaciones en memoria "
+        "episodica para Obsidian. Usala cuando Isaac diga 'empieza a grabar con OBS', "
+        "'documenta esta sesion', 'termina la captura', 'procesa la ultima grabacion "
+        "de OBS' o quiera guardar una sesion de programacion, investigacion, reunion, "
+        "edicion de video, curso o troubleshooting. start inicia grabacion; stop "
+        "detiene y puede procesar; process_latest procesa el ultimo video; "
+        "process_file procesa un archivo concreto; status revisa configuracion/OBS. "
+        "El backend puede borrar el video tras una nota exitosa segun retencion."
     ),
     parameters=types.Schema(
         type=types.Type.OBJECT,
         properties={
-            "command": types.Schema(
+            "action": types.Schema(
                 type=types.Type.STRING,
-                description="Comando PowerShell read-only.",
+                description=(
+                    "Accion: start, stop, status, process_latest, process_file. "
+                    "Aliases: begin/record, finish/end, latest."
+                ),
             ),
-            "cwd": types.Schema(
+            "title": types.Schema(
                 type=types.Type.STRING,
-                description="Directorio de trabajo opcional dentro del proyecto.",
+                description=(
+                    "Titulo humano de la sesion. Ej: Debug Upwork Agent, Reunion cliente, "
+                    "Investigacion OBS Jarvis."
+                ),
+            ),
+            "path": types.Schema(
+                type=types.Type.STRING,
+                description="Path absoluto del video para process_file.",
+            ),
+            "process": types.Schema(
+                type=types.Type.BOOLEAN,
+                description="En stop, si true procesa la grabacion al detener. Default true.",
             ),
         },
-        required=["command"],
+        required=["action"],
+    ),
+)
+
+FILE_ORGANIZER_DECL = types.FunctionDeclaration(
+    name="file_organizer",
+    description=(
+        "Organiza archivos locales de Isaac de forma segura, sin borrar ni "
+        "sobrescribir. Usa status para ver roots permitidos, scan para inspeccionar, "
+        "plan para crear un plan persistido de movimientos, preview para crear "
+        "una carpeta visible de vista previa sin mover originales, y apply para "
+        "aplicar un plan con aprobacion visual HITL. En modo dry-run apply no "
+        "mueve nada. Puede incluir carpetas/iconos del escritorio si include_folders=true. "
+        "No acepta shell libre."
+    ),
+    parameters=types.Schema(
+        type=types.Type.OBJECT,
+        properties={
+            "action": types.Schema(
+                type=types.Type.STRING,
+                description="Accion: status, scan, plan, preview, apply.",
+            ),
+            "root": types.Schema(
+                type=types.Type.STRING,
+                description="Root permitido para scan. Si se omite usa el primer root permitido.",
+            ),
+            "source_root": types.Schema(
+                type=types.Type.STRING,
+                description="Carpeta permitida de origen para crear un plan.",
+            ),
+            "target_root": types.Schema(
+                type=types.Type.STRING,
+                description="Carpeta permitida destino. Si se omite usa _Jarvis_Organized dentro del origen.",
+            ),
+            "recursive": types.Schema(
+                type=types.Type.BOOLEAN,
+                description="Si true inspecciona subcarpetas; default false.",
+            ),
+            "include_folders": types.Schema(
+                type=types.Type.BOOLEAN,
+                description=(
+                    "Si true incluye carpetas top-level como elementos movibles. "
+                    "Usalo para organizar iconos/carpetas del escritorio."
+                ),
+            ),
+            "limit": types.Schema(
+                type=types.Type.INTEGER,
+                description="Maximo de archivos a inspeccionar/planificar. Default 100, max 500.",
+            ),
+            "scheme": types.Schema(
+                type=types.Type.STRING,
+                description="Esquema de organizacion: by_type, by_extension, by_year_month.",
+            ),
+            "plan_id": types.Schema(
+                type=types.Type.STRING,
+                description="ID de plan a aplicar cuando action=apply.",
+            ),
+        },
+        required=["action"],
+    ),
+)
+
+DESKTOP_ICONS_DECL = types.FunctionDeclaration(
+    name="desktop_icons",
+    description=(
+        "Mueve visualmente la posicion de los iconos del escritorio de Windows. "
+        "Usala cuando Isaac pida mover/reacomodar fisicamente iconos en la pantalla "
+        "del escritorio. No mueve archivos a carpetas ni instalaciones; para eso usa "
+        "file_organizer. Requiere aprobacion HITL para arrange."
+    ),
+    parameters=types.Schema(
+        type=types.Type.OBJECT,
+        properties={
+            "action": types.Schema(
+                type=types.Type.STRING,
+                description="Accion: status, arrange.",
+            ),
+            "layout": types.Schema(
+                type=types.Type.STRING,
+                description="Layout: left, right, top. Default left.",
+            ),
+            "limit": types.Schema(
+                type=types.Type.INTEGER,
+                description="Maximo de iconos a reposicionar. Omitir para todos.",
+            ),
+            "start_x": types.Schema(
+                type=types.Type.INTEGER,
+                description="Coordenada X inicial en pixeles. Default 20.",
+            ),
+            "start_y": types.Schema(
+                type=types.Type.INTEGER,
+                description="Coordenada Y inicial en pixeles. Default 20.",
+            ),
+            "spacing_x": types.Schema(
+                type=types.Type.INTEGER,
+                description="Espaciado horizontal entre iconos. Default 120.",
+            ),
+            "spacing_y": types.Schema(
+                type=types.Type.INTEGER,
+                description="Espaciado vertical entre iconos. Default 95.",
+            ),
+            "columns": types.Schema(
+                type=types.Type.INTEGER,
+                description="Columnas para layout top. Opcional.",
+            ),
+        },
+        required=["action"],
+    ),
+)
+
+JARVIS_SKILL_DECL = types.FunctionDeclaration(
+    name="jarvis_skill",
+    description=(
+        "Gestiona skills runtime de Jarvis: perfiles operativos especializados "
+        "con instrucciones y tools recomendadas. Usala cuando Isaac pida activar "
+        "una capacidad/modo especializado, listar skills, o trabajar con una "
+        "tarea que encaja con una skill disponible."
+    ),
+    parameters=types.Schema(
+        type=types.Type.OBJECT,
+        properties={
+            "action": types.Schema(
+                type=types.Type.STRING,
+                description="Accion: list, get, activate, deactivate, status, reload.",
+            ),
+            "name": types.Schema(
+                type=types.Type.STRING,
+                description="Nombre de la skill para get/activate.",
+            ),
+        },
+        required=["action"],
+    ),
+)
+
+JARVIS_RUN_SAFE_COMMAND_DECL = types.FunctionDeclaration(
+    name="jarvis_run_safe_command",
+    description=(
+        "Ejecuta operaciones read-only estructuradas dentro del proyecto Jarvis. "
+        "No acepta shell libre ni PowerShell arbitrario. Usala para listar archivos, "
+        "leer archivos no sensibles, buscar texto o consultar estado git."
+    ),
+    parameters=types.Schema(
+        type=types.Type.OBJECT,
+        properties={
+            "operation": types.Schema(
+                type=types.Type.STRING,
+                description="Operacion: list_dir, read_file, search_text, git_status, git_diff_stat, git_log.",
+            ),
+            "path": types.Schema(
+                type=types.Type.STRING,
+                description="Path relativo dentro del proyecto. Requerido para read_file; opcional en list_dir/search_text.",
+            ),
+            "query": types.Schema(
+                type=types.Type.STRING,
+                description="Texto a buscar cuando operation=search_text.",
+            ),
+            "max_chars": types.Schema(
+                type=types.Type.INTEGER,
+                description="Maximo de caracteres para read_file. Default 4000, max 20000.",
+            ),
+            "limit": types.Schema(
+                type=types.Type.INTEGER,
+                description="Limite de items/resultados. Default 100, max 500.",
+            ),
+        },
+        required=["operation"],
     ),
 )
 
@@ -362,7 +688,11 @@ JARVIS_OPEN_URL_DECL = types.FunctionDeclaration(
 
 JARVIS_SET_MODE_DECL = types.FunctionDeclaration(
     name="jarvis_set_mode",
-    description="Cambia el modo de trabajo de Jarvis: general, coding, debugging, meeting o planning.",
+    description=(
+        "Cambia el modo de trabajo de Jarvis: general, coding, agentic, "
+        "debugging, meeting, planning, study o english. Usa agentic cuando "
+        "Isaac pida modo agentico o trabajo multi-paso con herramientas."
+    ),
     parameters=types.Schema(
         type=types.Type.OBJECT,
         properties={
@@ -376,6 +706,42 @@ JARVIS_GET_MODE_DECL = types.FunctionDeclaration(
     name="jarvis_get_mode",
     description="Consulta el modo de trabajo actual de Jarvis.",
     parameters=types.Schema(type=types.Type.OBJECT, properties={}),
+)
+
+ENGLISH_PRACTICE_DECL = types.FunctionDeclaration(
+    name="english_practice",
+    description=(
+        "Activa, desactiva o consulta English Practice Mode. Usala cuando Isaac "
+        "pida practicar ingles, hablar en ingles, corregir su ingles, preparar "
+        "entrevistas/roleplays en ingles, shadowing o desactivar la practica. "
+        "Cuando esta activo, Jarvis conversa principalmente en ingles y da "
+        "correcciones breves despues de cada intervencion de Isaac."
+    ),
+    parameters=types.Schema(
+        type=types.Type.OBJECT,
+        properties={
+            "action": types.Schema(
+                type=types.Type.STRING,
+                description="Accion: start, stop, status, roleplay, shadowing.",
+            ),
+            "level": types.Schema(
+                type=types.Type.STRING,
+                description="Nivel estimado: A1, A2, B1, B2, C1 o auto. Default auto.",
+            ),
+            "focus": types.Schema(
+                type=types.Type.STRING,
+                description=(
+                    "Enfoque de practica: conversation, pronunciation, interview, "
+                    "dev, upwork, travel, grammar, roleplay o shadowing."
+                ),
+            ),
+            "correction_style": types.Schema(
+                type=types.Type.STRING,
+                description="Estilo de correccion: light, standard o strict. Default standard.",
+            ),
+        },
+        required=["action"],
+    ),
 )
 
 JARVIS_SECURITY_STATUS_DECL = types.FunctionDeclaration(
@@ -489,24 +855,82 @@ OBSIDIAN_MCP_DECL = types.FunctionDeclaration(
 )
 
 
+JARVIS_LISTEN_MODE_DECL = types.FunctionDeclaration(
+    name="jarvis_listen_mode",
+    description=(
+        "Cambia el MODO DE ESCUCHA de Jarvis. Usala cuando Isaac pida activar o "
+        "desactivar la escucha libre / manos libres por voz, para no tener que usar "
+        "la tecla Ctrl+Shift+M. Frases tipicas: 'activá escucha libre', 'modo manos "
+        "libres', 'escuchame en libre', 'dejá el microfono abierto' -> mode='libre'. "
+        "'salí de escucha libre', 'volvé a push to talk', 'dejá de escucharme', "
+        "'apagá el microfono', 'modo manual' -> mode='ptt'. Es idempotente: si ya "
+        "esta en ese modo, lo confirma sin error. NO la uses para los modos de "
+        "trabajo (coding/study/etc): para eso esta jarvis_set_mode."
+    ),
+    parameters=types.Schema(
+        type=types.Type.OBJECT,
+        properties={
+            "mode": types.Schema(
+                type=types.Type.STRING,
+                description="'libre' (manos libres, VAD) o 'ptt' (push-to-talk con Ctrl).",
+            ),
+        },
+        required=["mode"],
+    ),
+)
+
+
+JARVIS_PROACTIVE_CHECK_DECL = types.FunctionDeclaration(
+    name="jarvis_proactive_check",
+    description=(
+        "Consulta si JARVIS tiene una sugerencia proactiva pertinente para ofrecer "
+        "AHORA. Llamala SOLO en ventanas naturales: cuando un tema se cierra, cuando "
+        "Isaac pregunta '¿algo mas?', o al cerrar la sesion. NUNCA a media explicacion. "
+        "Devuelve una sola oportunidad estructurada (o ninguna). Si Isaac descarto la "
+        "sugerencia anterior, vuelve a llamarla con dismissed_last=true para no repetirla."
+    ),
+    parameters=types.Schema(
+        type=types.Type.OBJECT,
+        properties={
+            "dismissed_last": types.Schema(
+                type=types.Type.BOOLEAN,
+                description="true si Isaac ignoro/rechazo la sugerencia ofrecida antes.",
+            ),
+        },
+    ),
+)
+
+
 def all_function_declarations() -> list[types.FunctionDeclaration]:
     return [
         JARVIS_RECALL_DECL,
+        JARVIS_SESSION_RECALL_DECL,
         JARVIS_REMEMBER_DECL,
         JARVIS_BROWSE_DECL,
         JARVIS_LINK_DECL,
+        ASK_GPT55_CODE_DECL,
         ASK_CLAUDE_DEEP_DECL,
         SCREEN_LOOK_DECL,
+        CAMERA_LOOK_DECL,
+        CAMERA_WATCH_DECL,
+        CAMERA_FOCUS_DECL,
         CHROME_READ_PAGE_DECL,
         STUDY_MODE_DECL,
+        OBS_MEMORY_DECL,
+        FILE_ORGANIZER_DECL,
+        DESKTOP_ICONS_DECL,
+        JARVIS_SKILL_DECL,
         JARVIS_RUN_SAFE_COMMAND_DECL,
         JARVIS_OPEN_POWERSHELL_DECL,
         JARVIS_OPEN_URL_DECL,
         JARVIS_SET_MODE_DECL,
         JARVIS_GET_MODE_DECL,
+        JARVIS_LISTEN_MODE_DECL,
+        ENGLISH_PRACTICE_DECL,
         JARVIS_SECURITY_STATUS_DECL,
         SPOTIFY_CONTROL_DECL,
         OBSIDIAN_MCP_DECL,
+        JARVIS_PROACTIVE_CHECK_DECL,
     ]
 
 
@@ -520,21 +944,94 @@ def make_tool_object() -> types.Tool:
 # =====================================================================
 
 def jarvis_recall(ctx: ToolContext, query: str, top_k: int = 3) -> dict:
-    top_k = max(1, min(int(top_k or 3), 5))
-    results = ctx.rag.search(query, top_k=top_k)
+    top_k = max(1, min(int(top_k or 3), int(os.environ.get("JARVIS_SEMANTIC_MAX_RESULTS", "8"))))
+    backend = "semantic" if ctx.semantic_memory is not None else "rag"
+    try:
+        results = (
+            ctx.semantic_memory.search(query, top_k=top_k)
+            if ctx.semantic_memory is not None
+            else ctx.rag.search(query, top_k=min(top_k, 5))
+        )
+    except Exception:
+        backend = "rag"
+        results = ctx.rag.search(query, top_k=min(top_k, 5))
     return {
         "query": query,
+        "backend": backend,
         "found": len(results),
         "results": [
-            {
-                "title": r.chunk.title,
-                "path": r.chunk.rel_path,
-                "score": round(r.score, 3),
-                "snippet": r.chunk.text[:400],
-            }
+            _recall_result_dict(ctx, r)
             for r in results
         ],
     }
+
+
+def jarvis_session_recall(
+    ctx: ToolContext,
+    query: str = "",
+    when: str = "",
+    limit: int = 5,
+) -> dict:
+    """Cheap temporal recall over synthesized session notes."""
+    return search_session_summaries(
+        ctx.vault,
+        query=query or "",
+        when=when or "",
+        limit=limit,
+    )
+
+
+def jarvis_proactive_check(ctx: ToolContext, dismissed_last: bool = False) -> dict:
+    """Devuelve la oportunidad proactiva top estructurada (o ninguna). Fail-safe."""
+    engine = ctx.proactivity
+    if engine is None:
+        return {"has_opportunity": False, "opportunity": None}
+    try:
+        if dismissed_last:
+            engine.dismiss_last()
+        struct = engine.next_opportunity()
+    except Exception:
+        return {"has_opportunity": False, "opportunity": None}
+    return {"has_opportunity": struct is not None, "opportunity": struct}
+
+
+def _recall_result_dict(ctx: ToolContext, result) -> dict:
+    chunk = result.chunk
+    out = {
+        "title": chunk.title,
+        "path": chunk.rel_path,
+        "score": round(result.score, 3),
+        "snippet": chunk.text[:400],
+    }
+    for key in ("source_type", "source_uri", "date", "project", "confidence"):
+        value = getattr(chunk, key, None)
+        if value:
+            out[key] = value
+    tags = getattr(chunk, "tags", None)
+    if tags:
+        out["tags"] = tags
+    out.update(_note_memory_metadata(ctx, chunk.rel_path))
+    return out
+
+
+def _note_memory_metadata(ctx: ToolContext, rel_path: str) -> dict:
+    try:
+        path = (ctx.vault.vault_path / rel_path).resolve()
+        note = notes_mod.read_note(ctx.vault, path)
+    except Exception:
+        return {}
+    keys = (
+        "type",
+        "memory_kind",
+        "importance",
+        "confidence",
+        "last_confirmed",
+        "updated",
+    )
+    meta = {key: note.frontmatter[key] for key in keys if key in note.frontmatter}
+    if note.tags:
+        meta["tags"] = note.tags
+    return meta
 
 
 def jarvis_remember(
@@ -543,19 +1040,99 @@ def jarvis_remember(
     content: str,
     tags: list[str] | None = None,
 ) -> dict:
+    triage = triage_memory(title, content, tags)
+    if not triage.should_save:
+        return {
+            "saved": False,
+            "blocked": triage.memory_kind == "sensitive",
+            "memory_kind": triage.memory_kind,
+            "reason": triage.reason,
+            "tags": triage.tags,
+        }
+
     path = ctx.vault.memory_file(title)
-    note = notes_mod.write_note(
-        ctx.vault, path,
-        body=content,
-        tags=tags or [],
-    )
+    frontmatter = {
+        "type": "jarvis-memory",
+        "memory_kind": triage.memory_kind,
+        "source": "jarvis_remember",
+        "confidence": triage.confidence,
+        "importance": triage.importance,
+        "last_confirmed": _now_iso(),
+    }
+    if triage.project:
+        frontmatter["project"] = triage.project
+    operation = "created"
+    if path.exists():
+        existing = notes_mod.read_note(ctx.vault, path)
+        existing_tags = existing.tags
+        merged_tags = sorted(set(existing_tags + triage.tags))
+        existing.frontmatter["type"] = existing.frontmatter.get("type", "jarvis-memory")
+        existing.frontmatter["memory_kind"] = existing.frontmatter.get("memory_kind", triage.memory_kind)
+        existing.frontmatter["source"] = existing.frontmatter.get("source", "jarvis_remember")
+        existing.frontmatter["confidence"] = triage.confidence
+        existing.frontmatter["importance"] = triage.importance
+        existing.frontmatter["last_confirmed"] = _now_iso()
+        if triage.project:
+            existing.frontmatter["project"] = triage.project
+        existing.frontmatter["tags"] = merged_tags
+        section_title = f"Memory update - {triage.memory_kind}"
+        existing.body = (
+            existing.body.rstrip()
+            + f"\n\n## {section_title} ({_now_iso()[:10]})\n\n"
+            + content.strip()
+            + "\n"
+        )
+        note = notes_mod.write_note(ctx.vault, path, existing.body, existing.frontmatter)
+        operation = "appended"
+    else:
+        note = notes_mod.write_note(
+            ctx.vault,
+            path,
+            body=content,
+            frontmatter=frontmatter,
+            tags=triage.tags,
+        )
     rel = path.relative_to(ctx.vault.vault_path)
-    return {
+    index_result = _index_memory_now(ctx, path)
+    project_card = update_project_memory_card(
+        ctx.vault,
+        triage,
+        source_title=note.title,
+        content=content,
+    )
+    if project_card.get("updated") and project_card.get("path"):
+        card_path = (ctx.vault.vault_path / project_card["path"]).resolve()
+        project_card["index"] = _index_memory_now(ctx, card_path)
+    result = {
         "saved": True,
+        "operation": operation,
         "path": str(rel),
         "title": note.title,
         "tags": note.tags,
+        "memory_kind": triage.memory_kind,
+        "importance": triage.importance,
+        "confidence": triage.confidence,
+        "project": triage.project,
+        "project_card": project_card,
     }
+    result.update(index_result)
+    return result
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).astimezone().strftime("%Y-%m-%dT%H:%M:%S%z")
+
+
+def _index_memory_now(ctx: ToolContext, path: Path) -> dict:
+    try:
+        chunks = ctx.rag.index_file(path)
+        ctx.rag.save()
+        return {"indexed": True, "chunks_indexed": chunks}
+    except Exception as exc:
+        return {
+            "indexed": False,
+            "index_error": f"{type(exc).__name__}: {exc}",
+        }
 
 
 def jarvis_browse(ctx: ToolContext, folder: str = "", limit: int = 20) -> dict:
@@ -609,6 +1186,28 @@ def _format_claude_response(model: str, r) -> dict:
     }
 
 
+def _format_gpt55_code_response(model: str, r) -> dict:
+    return {
+        "ok": True,
+        "model": model,
+        "text": r.text,
+        "latency_ms": round(r.latency_ms),
+        "cost_usd": round(r.cost_usd, 6),
+        "tokens": {
+            "input": r.input_tokens,
+            "output": r.output_tokens,
+        },
+    }
+
+
+def _gpt55_code_preflight(ctx: ToolContext) -> dict | None:
+    if ctx.code_reasoner is None:
+        return {"ok": False, "error": "GPT55CodeReasoner no configurado"}
+    if hasattr(ctx.code_reasoner, "configured") and not ctx.code_reasoner.configured:
+        return {"ok": False, "error": "OPENAI_API_KEY no configurada"}
+    return None
+
+
 def _claude_preflight(ctx: ToolContext) -> dict | None:
     if ctx.reasoner is None:
         return {"ok": False, "error": "ClaudeReasoner no configurado"}
@@ -617,33 +1216,93 @@ def _claude_preflight(ctx: ToolContext) -> dict | None:
     return None
 
 
+def _merge_context(model_ctx: str | None, auto_ctx: str) -> str | None:
+    parts = [p for p in (model_ctx, auto_ctx) if p and p.strip()]
+    return "\n\n".join(parts) if parts else None
+
+
+def _augmented_context(ctx: ToolContext, prompt: str, context_extra: str | None) -> str | None:
+    try:
+        auto = build_project_context(ctx.vault, ctx.rag, prompt, semantic_memory=ctx.semantic_memory)
+    except Exception:
+        return context_extra  # fail-safe: nunca rompe el razonamiento
+    return _merge_context(context_extra, auto.text)
+
+
 def ask_claude_deep(
     ctx: ToolContext,
     prompt: str,
     context_extra: str | None = None,
-    max_tokens: int = 1024,
+    max_tokens: int = 450,
 ) -> dict:
     err = _claude_preflight(ctx)
     if err is not None:
         return err
-    max_tokens = max(128, min(int(max_tokens or 1024), 2048))
-    r = ctx.reasoner.ask(prompt, context_extra=context_extra, max_tokens=max_tokens)
+    max_tokens = max(128, min(int(max_tokens or 450), 2048))
+    merged = _augmented_context(ctx, prompt, context_extra)
+    r = ctx.reasoner.ask(prompt, context_extra=merged, max_tokens=max_tokens)
     return _format_claude_response(ctx.reasoner.model, r)
+
+
+def ask_gpt55_code(
+    ctx: ToolContext,
+    prompt: str,
+    context_extra: str | None = None,
+    max_output_tokens: int = 1600,
+) -> dict:
+    err = _gpt55_code_preflight(ctx)
+    if err is not None:
+        return err
+    max_output_tokens = max(256, min(int(max_output_tokens or 1600), 8192))
+    merged = _augmented_context(ctx, prompt, context_extra)
+    r = ctx.code_reasoner.ask(
+        prompt,
+        context_extra=merged,
+        max_output_tokens=max_output_tokens,
+    )
+    return _format_gpt55_code_response(ctx.code_reasoner.model, r)
+
+
+async def ask_gpt55_code_async(
+    ctx: ToolContext,
+    prompt: str,
+    context_extra: str | None = None,
+    max_output_tokens: int = 1600,
+) -> dict:
+    err = _gpt55_code_preflight(ctx)
+    if err is not None:
+        return err
+    max_output_tokens = max(256, min(int(max_output_tokens or 1600), 8192))
+    merged = _augmented_context(ctx, prompt, context_extra)
+    if hasattr(ctx.code_reasoner, "ask_async"):
+        r = await ctx.code_reasoner.ask_async(
+            prompt,
+            context_extra=merged,
+            max_output_tokens=max_output_tokens,
+        )
+    else:
+        r = ctx.code_reasoner.ask(
+            prompt,
+            context_extra=merged,
+            max_output_tokens=max_output_tokens,
+        )
+    return _format_gpt55_code_response(ctx.code_reasoner.model, r)
 
 
 async def ask_claude_deep_async(
     ctx: ToolContext,
     prompt: str,
     context_extra: str | None = None,
-    max_tokens: int = 1024,
+    max_tokens: int = 450,
 ) -> dict:
     """Version async usada por el dispatcher para que asyncio.wait_for cancele
     la request HTTP de verdad cuando expira el timeout."""
     err = _claude_preflight(ctx)
     if err is not None:
         return err
-    max_tokens = max(128, min(int(max_tokens or 1024), 2048))
-    r = await ctx.reasoner.ask_async(prompt, context_extra=context_extra, max_tokens=max_tokens)
+    max_tokens = max(128, min(int(max_tokens or 450), 2048))
+    merged = _augmented_context(ctx, prompt, context_extra)
+    r = await ctx.reasoner.ask_async(prompt, context_extra=merged, max_tokens=max_tokens)
     return _format_claude_response(ctx.reasoner.model, r)
 
 
@@ -674,6 +1333,75 @@ def screen_look(ctx: ToolContext, reason: str = "") -> dict:
         "mime_type": shot.mime_type,
     }
     return response
+
+
+def camera_look(ctx: ToolContext, reason: str = "") -> dict:
+    """Captura una foto de la webcam y la adjunta como contenido del siguiente turno.
+
+    Mismo patron que screen_look: marcamos la imagen con __attach_image (clave
+    privada) y el dispatcher en gemini/session.py la envia via send_client_content
+    tras el tool_response. Reutiliza la clave 'png_bytes' (el side-channel es
+    agnostico al formato; el mime_type indica que es JPEG).
+    """
+    if ctx.camera is None:
+        return {"captured": False, "error": "Camara no configurada."}
+    if ctx.camera_watch is not None and ctx.camera_watch.is_active():
+        return {
+            "captured": False,
+            "active": True,
+            "error": (
+                "Modo vision activo. Di 'ya' o usa camera_watch(action='stop') "
+                "antes de tomar una foto con camera_look."
+            ),
+        }
+    try:
+        frame = ctx.camera.capture()
+    except Exception as exc:
+        return {"captured": False, "error": f"{type(exc).__name__}: {exc}"}
+    response = frame.as_dict()
+    response["reason"] = reason
+    response["image_ref"] = frame.path.name
+    response["note"] = (
+        "Foto de camara adjuntada como user-content en el siguiente turno; "
+        "analizala y responde."
+    )
+    response["__attach_image"] = {
+        "png_bytes": frame.jpeg_bytes,
+        "mime_type": frame.mime_type,
+        "source": "camera",
+    }
+    return response
+
+
+def camera_watch(ctx: ToolContext, action: str = "start", duration_s: float | None = None) -> dict:
+    """Activa/desactiva el modo vision continuo (CameraWatchController)."""
+    ctrl = ctx.camera_watch
+    if ctrl is None:
+        return {"ok": False, "active": False, "error": "Modo vision no configurado."}
+    act = (action or "start").strip().lower()
+    if act == "stop":
+        return ctrl.stop()
+    if act == "start":
+        return ctrl.start(duration_s=duration_s)
+    return {"ok": False, "active": ctrl.is_active(), "error": f"action invalida: {action}"}
+
+
+def camera_focus(ctx: ToolContext, label: str = "") -> dict:
+    """Detecta el objeto principal del ultimo frame y dispara el crosshair."""
+    import vision.detect as detect
+
+    if ctx.camera is None or ctx.camera.last is None:
+        return {"found": False, "error": "No hay captura reciente de camara."}
+    frame = ctx.camera.last
+    result = detect.detect_object(ctx.genai_client, frame.jpeg_bytes)
+    if result is None:
+        return {"found": False, "note": "No pude ubicar el objeto con precision."}
+    if ctx.on_focus_box is not None:
+        try:
+            ctx.on_focus_box(result["box_2d"], result.get("label", ""))
+        except Exception:
+            pass
+    return {"found": True, "label": result.get("label", ""), "box_2d": result["box_2d"]}
 
 
 def chrome_read_page(
@@ -711,6 +1439,7 @@ def chrome_read_page(
 
 
 _STUDY_CONTROLLER = None
+_OBS_MEMORY_CONTROLLER = None
 
 
 def _get_study_controller(ctx: ToolContext):
@@ -723,6 +1452,20 @@ def _get_study_controller(ctx: ToolContext):
             reasoner=ctx.reasoner,
         )
     return _STUDY_CONTROLLER
+
+
+def _get_obs_memory_controller(ctx: ToolContext):
+    global _OBS_MEMORY_CONTROLLER
+    if ctx.obs_memory is not None:
+        return ctx.obs_memory
+    if _OBS_MEMORY_CONTROLLER is None:
+        from obs_memory import OBSMemoryController
+
+        _OBS_MEMORY_CONTROLLER = OBSMemoryController(
+            vault=ctx.vault,
+            reasoner=ctx.reasoner,
+        )
+    return _OBS_MEMORY_CONTROLLER
 
 
 def study_mode(
@@ -835,10 +1578,270 @@ def _require_study_approval(
     return None
 
 
-def jarvis_run_safe_command(ctx: ToolContext, command: str, cwd: str | None = None) -> dict:
+def obs_memory(
+    ctx: ToolContext,
+    action: str,
+    title: str | None = None,
+    path: str | None = None,
+    process: bool | None = None,
+) -> dict:
+    """Controla OBS y procesa grabaciones como memoria episodica."""
+    controller = _get_obs_memory_controller(ctx)
+    op = (action or "").strip().lower()
+    aliases = {
+        "begin": "start",
+        "record": "start",
+        "start_recording": "start",
+        "finish": "stop",
+        "end": "stop",
+        "stop_recording": "stop",
+        "latest": "process_latest",
+        "process": "process_latest",
+    }
+    op = aliases.get(op, op)
+    if op == "status":
+        return controller.status()
+    if op == "start":
+        approval = _require_obs_approval(
+            ctx,
+            "write",
+            "Jarvis quiere iniciar una grabacion OBS para memoria episodica",
+            {"title": title or "OBS Session"},
+        )
+        if approval is not None:
+            return approval
+        return controller.start(title=title)
+    if op == "stop":
+        approval = _require_obs_approval(
+            ctx,
+            "destructive",
+            "Jarvis quiere detener OBS, guardar memoria y borrar video si el proceso termina bien",
+            {"title": title or "(sesion actual)", "process": True if process is None else bool(process)},
+        )
+        if approval is not None:
+            return approval
+        return controller.stop(title=title, process=True if process is None else bool(process))
+    if op == "process_latest":
+        approval = _require_obs_approval(
+            ctx,
+            "destructive",
+            "Jarvis quiere procesar la ultima grabacion OBS y borrar el video tras exito",
+            {"title": title or "(archivo)", "source": "latest"},
+        )
+        if approval is not None:
+            return approval
+        return controller.process_latest(title=title, background=True)
+    if op == "process_file":
+        if not path:
+            return {"ok": False, "error": "process_file requiere path"}
+        approval = _require_obs_approval(
+            ctx,
+            "destructive",
+            "Jarvis quiere procesar una grabacion OBS y borrar el video tras exito",
+            {"title": title or "(archivo)", "path": path},
+        )
+        if approval is not None:
+            return approval
+        return {
+            "ok": True,
+            "processing": "background",
+            "job": controller.enqueue_process(path, title=title),
+        }
+    return {
+        "ok": False,
+        "error": f"accion OBS Memory invalida: {action}",
+        "valid_actions": ["start", "stop", "status", "process_latest", "process_file"],
+    }
+
+
+def _require_obs_approval(
+    ctx: ToolContext,
+    risk: str,
+    title: str,
+    details: dict,
+) -> dict | None:
+    if ctx.approvals is None:
+        return {
+            "ok": False,
+            "error": "OBS Memory requiere aprobacion HITL para grabar/escribir/borrar video",
+        }
+    approved = ctx.approvals.request(
+        risk=risk,
+        title=title,
+        details=f"OBS Memory\nDetalles: {details}",
+    )
+    if not approved:
+        return {"ok": False, "error": "OBS Memory rechazado por Isaac o timeout HITL"}
+    return None
+
+
+def jarvis_run_safe_command(
+    ctx: ToolContext,
+    operation: str | None = None,
+    path: str | None = None,
+    query: str | None = None,
+    max_chars: int | None = None,
+    limit: int | None = None,
+    command: str | None = None,
+    cwd: str | None = None,
+) -> dict:
     if ctx.actions is None:
         return {"executed": False, "error": "SafeActionExecutor no configurado"}
-    return ctx.actions.run_powershell(command=command, cwd=cwd)
+    if command or cwd:
+        return {
+            "ok": False,
+            "allowed": False,
+            "error": "PowerShell libre no esta expuesto a Gemini; usa operation/path/query estructurados.",
+        }
+    return ctx.actions.run_structured(
+        operation=operation or "",
+        path=path,
+        query=query,
+        max_chars=max_chars,
+        limit=limit,
+    )
+
+
+_FILE_ORGANIZER = None
+
+
+def _get_file_organizer(ctx: ToolContext):
+    global _FILE_ORGANIZER
+    if _FILE_ORGANIZER is None:
+        from actions.file_organizer import FileOrganizer
+
+        state_dir = Path(__file__).resolve().parent.parent / "data" / "file_organizer"
+        _FILE_ORGANIZER = FileOrganizer(
+            state_dir=state_dir,
+            approval_broker=ctx.approvals,
+        )
+    return _FILE_ORGANIZER
+
+
+def file_organizer(
+    ctx: ToolContext,
+    action: str,
+    root: str | None = None,
+    source_root: str | None = None,
+    target_root: str | None = None,
+    recursive: bool = False,
+    include_folders: bool = False,
+    limit: int = 100,
+    scheme: str = "by_type",
+    plan_id: str | None = None,
+) -> dict:
+    organizer = _get_file_organizer(ctx)
+    op = (action or "").strip().lower()
+    if op == "status":
+        return organizer.status()
+    if op == "scan":
+        return organizer.scan(
+            root=root,
+            recursive=bool(recursive),
+            include_folders=bool(include_folders),
+            limit=int(limit or 100),
+        )
+    if op == "plan":
+        return organizer.plan(
+            source_root=source_root or root,
+            target_root=target_root,
+            recursive=bool(recursive),
+            include_folders=bool(include_folders),
+            limit=int(limit or 100),
+            scheme=scheme or "by_type",
+        )
+    if op == "preview":
+        return organizer.preview(plan_id or "")
+    if op == "apply":
+        return organizer.apply(plan_id or "")
+    return {
+        "ok": False,
+        "error": f"accion file_organizer invalida: {action}",
+        "valid_actions": ["status", "scan", "plan", "preview", "apply"],
+    }
+
+
+_DESKTOP_ICON_CONTROLLER = None
+
+
+def _get_desktop_icon_controller(ctx: ToolContext):
+    global _DESKTOP_ICON_CONTROLLER
+    if _DESKTOP_ICON_CONTROLLER is None:
+        from actions.desktop_icons import DesktopIconController
+
+        _DESKTOP_ICON_CONTROLLER = DesktopIconController(approval_broker=ctx.approvals)
+    return _DESKTOP_ICON_CONTROLLER
+
+
+def desktop_icons(
+    ctx: ToolContext,
+    action: str,
+    layout: str = "left",
+    limit: int | None = None,
+    start_x: int = 20,
+    start_y: int = 20,
+    spacing_x: int = 120,
+    spacing_y: int = 95,
+    columns: int | None = None,
+) -> dict:
+    controller = _get_desktop_icon_controller(ctx)
+    op = (action or "").strip().lower()
+    if op == "status":
+        return controller.status()
+    if op == "arrange":
+        return controller.arrange(
+            layout=layout or "left",
+            limit=limit,
+            start_x=int(start_x or 20),
+            start_y=int(start_y or 20),
+            spacing_x=int(spacing_x or 120),
+            spacing_y=int(spacing_y or 95),
+            columns=columns,
+        )
+    return {
+        "ok": False,
+        "error": f"accion desktop_icons invalida: {action}",
+        "valid_actions": ["status", "arrange"],
+    }
+
+
+_SKILL_REGISTRY = None
+
+
+def _get_skill_registry():
+    global _SKILL_REGISTRY
+    if _SKILL_REGISTRY is None:
+        from skills.registry import SkillRegistry
+
+        root = Path(__file__).resolve().parent.parent
+        _SKILL_REGISTRY = SkillRegistry(
+            skill_dir=root / "skills" / "local",
+            state_path=root / "data" / "skills" / "state.json",
+        )
+    return _SKILL_REGISTRY
+
+
+def jarvis_skill(action: str, name: str | None = None) -> dict:
+    registry = _get_skill_registry()
+    op = (action or "").strip().lower()
+    if op == "list":
+        return {"ok": True, "skills": registry.list()}
+    if op == "get":
+        return registry.get(name or "")
+    if op == "activate":
+        return registry.activate(name or "")
+    if op == "deactivate":
+        return registry.deactivate()
+    if op == "status":
+        return registry.status()
+    if op == "reload":
+        registry.reload()
+        return {"ok": True, "skills": registry.list()}
+    return {
+        "ok": False,
+        "error": f"accion jarvis_skill invalida: {action}",
+        "valid_actions": ["list", "get", "activate", "deactivate", "status", "reload"],
+    }
 
 
 def jarvis_open_url(ctx: ToolContext, url: str | None = None) -> dict:
@@ -859,24 +1862,117 @@ def jarvis_set_mode(ctx: ToolContext, mode: str) -> dict:
     return ctx.modes.set_mode(mode)
 
 
+# Alias de lenguaje natural -> modo de escucha canonico (PTT/LIBRE).
+_LISTEN_MODE_ALIASES = {
+    "libre": "LIBRE", "escucha libre": "LIBRE", "manos libres": "LIBRE",
+    "manoslibres": "LIBRE", "free": "LIBRE", "abierto": "LIBRE", "on": "LIBRE",
+    "ptt": "PTT", "push to talk": "PTT", "push-to-talk": "PTT", "pushtotalk": "PTT",
+    "manual": "PTT", "cerrado": "PTT", "off": "PTT",
+}
+
+
+def jarvis_listen_mode(ctx: ToolContext, mode: str) -> dict:
+    """Cambia el modo de ESCUCHA (PTT <-> LIBRE) por voz.
+
+    Delega en el callback `set_listen_mode` que Jarvis inyecta en el ToolContext;
+    ese callback aplica el mismo flujo que la hotkey Ctrl+Shift+M (VAD, capture,
+    overlay) de forma idempotente.
+    """
+    if ctx.set_listen_mode is None:
+        return {"ok": False, "error": "control de modo de escucha no disponible"}
+    target = _LISTEN_MODE_ALIASES.get((mode or "").strip().lower())
+    if target is None:
+        return {
+            "ok": False,
+            "error": f"modo de escucha desconocido: {mode}",
+            "validos": ["libre", "ptt"],
+        }
+    return ctx.set_listen_mode(target)
+
+
 def jarvis_get_mode(ctx: ToolContext) -> dict:
     if ctx.modes is None:
         return {"error": "ModeManager no configurado"}
     return ctx.modes.get_mode()
 
 
+def english_practice(
+    ctx: ToolContext,
+    action: str,
+    level: str | None = None,
+    focus: str | None = None,
+    correction_style: str | None = None,
+) -> dict:
+    """Activa o desactiva el modo de practica de ingles.
+
+    No guarda estado propio persistente; reutiliza ModeManager para que el modo
+    sea visible a las tools existentes y al contexto conversacional de Gemini.
+    """
+    if ctx.modes is None:
+        return {"ok": False, "error": "ModeManager no configurado"}
+
+    op = (action or "").strip().lower()
+    normalized_level = (level or "auto").strip().upper()
+    normalized_focus = (focus or "conversation").strip().lower()
+    normalized_correction = (correction_style or "standard").strip().lower()
+    if normalized_correction not in {"light", "standard", "strict"}:
+        normalized_correction = "standard"
+
+    if op in {"start", "on", "enable", "activate", "roleplay", "shadowing"}:
+        result = ctx.modes.set_mode("english")
+        return {
+            "ok": result.get("changed", False),
+            "active": True,
+            "mode": result.get("mode", "english"),
+            "level": normalized_level,
+            "focus": "roleplay" if op == "roleplay" else ("shadowing" if op == "shadowing" else normalized_focus),
+            "correction_style": normalized_correction,
+            "instructions": (
+                "English Practice Mode is active. Speak mostly in English, keep "
+                "the conversation flowing, then give concise feedback: correction, "
+                "natural version, and one quick repetition exercise. Use Spanish "
+                "only for short clarifications if Isaac is stuck."
+            ),
+        }
+    if op in {"stop", "off", "disable", "deactivate", "finish", "end"}:
+        result = ctx.modes.set_mode("general")
+        return {
+            "ok": result.get("changed", False),
+            "active": False,
+            "mode": result.get("mode", "general"),
+            "instructions": "English Practice Mode is off. Return to Jarvis default Spanish behavior.",
+        }
+    if op == "status":
+        current = ctx.modes.get_mode()
+        return {
+            "ok": True,
+            "active": current.get("mode") == "english",
+            **current,
+        }
+    return {
+        "ok": False,
+        "error": f"accion English Practice invalida: {action}",
+        "valid_actions": ["start", "stop", "status", "roleplay", "shadowing"],
+    }
+
+
 def jarvis_security_status(ctx: ToolContext) -> dict:
     action_root = str(getattr(ctx.actions, "root", "")) if ctx.actions is not None else None
     vault_root = str(getattr(ctx.vault, "vault_path", ""))
     delete_enabled = os.environ.get("JARVIS_OBSIDIAN_MCP_ALLOW_DELETE", "false").lower() == "true"
+    try:
+        organizer_status = _get_file_organizer(ctx).status()
+    except Exception as exc:
+        organizer_status = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
     return {
         "ok": True,
         "summary": "Politicas de seguridad activas en backend Python, no solo en prompt.",
         "hitl": {
             "enabled": ctx.approvals is not None,
             "applies_to": [
-                "comandos PowerShell no-read-only",
-                "git push / git commit / instalaciones",
+                "abrir terminales",
+                "acciones sensibles no expuestas como operaciones read-only",
+                "aplicar planes de organizacion de archivos locales",
                 "operaciones MCP de escritura en Obsidian",
                 "borrado Obsidian cuando la env var lo permite",
             ],
@@ -886,7 +1982,9 @@ def jarvis_security_status(ctx: ToolContext) -> dict:
             "actions_root": action_root,
             "obsidian_vault_root": vault_root,
             "path_validation": "Path.resolve() + relative_to(root)",
+            "command_interface": "operaciones read-only estructuradas; PowerShell libre no expuesto a Gemini",
         },
+        "file_organizer": organizer_status,
         "secret_filter": {
             "enabled": True,
             "blocked_filenames": sorted(SECRET_FILENAMES),
@@ -1146,29 +2244,42 @@ class ToolDispatcher:
         self.ctx = ctx
         self._tools: dict[str, Callable[..., dict | ToolResult]] = {
             "jarvis_recall": lambda **kw: jarvis_recall(ctx, **kw),
+            "jarvis_session_recall": lambda **kw: jarvis_session_recall(ctx, **kw),
             "jarvis_remember": lambda **kw: jarvis_remember(ctx, **kw),
             "jarvis_browse": lambda **kw: jarvis_browse(ctx, **kw),
             "jarvis_link": lambda **kw: jarvis_link(ctx, **kw),
+            "ask_gpt55_code": lambda **kw: ask_gpt55_code(ctx, **kw),
             "ask_claude_deep": lambda **kw: ask_claude_deep(ctx, **kw),
             "screen_look": lambda **kw: screen_look(ctx, **kw),
+            "camera_look": lambda **kw: camera_look(ctx, **kw),
+            "camera_watch": lambda **kw: camera_watch(ctx, **kw),
+            "camera_focus": lambda **kw: camera_focus(ctx, **kw),
             "chrome_read_page": lambda **kw: chrome_read_page(**kw),
             "study_mode": lambda **kw: study_mode(ctx, **kw),
+            "obs_memory": lambda **kw: obs_memory(ctx, **kw),
+            "file_organizer": lambda **kw: file_organizer(ctx, **kw),
+            "desktop_icons": lambda **kw: desktop_icons(ctx, **kw),
+            "jarvis_skill": lambda **kw: jarvis_skill(**kw),
             "jarvis_run_safe_command": lambda **kw: jarvis_run_safe_command(ctx, **kw),
             "jarvis_open_powershell": lambda **kw: jarvis_open_powershell(ctx, **kw),
             "jarvis_open_url": lambda **kw: jarvis_open_url(ctx, **kw),
             "jarvis_set_mode": lambda **kw: jarvis_set_mode(ctx, **kw),
             "jarvis_get_mode": lambda **kw: jarvis_get_mode(ctx),
+            "jarvis_listen_mode": lambda **kw: jarvis_listen_mode(ctx, **kw),
+            "english_practice": lambda **kw: english_practice(ctx, **kw),
             "jarvis_security_status": lambda **kw: jarvis_security_status(ctx),
             "spotify_control": lambda **kw: {
                 "ok": True,
                 "message": spotify_control(**kw),
             },
             "obsidian_mcp": lambda **kw: obsidian_mcp(ctx, **kw),
+            "jarvis_proactive_check": lambda **kw: jarvis_proactive_check(ctx, **kw),
         }
         # Tools que tienen version async (devuelven coroutine awaitable).
         # El dispatcher async las invoca directamente sobre el event loop
         # para que asyncio.wait_for las cancele de verdad cuando expira.
         self._async_tools: dict[str, Callable[..., Any]] = {
+            "ask_gpt55_code": lambda **kw: ask_gpt55_code_async(ctx, **kw),
             "ask_claude_deep": lambda **kw: ask_claude_deep_async(ctx, **kw),
         }
 

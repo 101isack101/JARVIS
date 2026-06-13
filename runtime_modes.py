@@ -7,11 +7,13 @@ from dataclasses import dataclass
 
 MODES = {
     "general": "Conversacion normal, respuestas rapidas y memoria cuando ayude.",
-    "coding": "Prioriza codigo, debugging, arquitectura y delegacion a Claude para razonamiento profundo.",
+    "coding": "Prioriza codigo, debugging, arquitectura y delegacion a GPT 5.5 para trabajo tecnico.",
+    "agentic": "Prioriza objetivos multi-paso, tool routing, planes verificables y delegacion a GPT 5.5.",
     "debugging": "Prioriza logs, errores, pantalla y pasos de reproduccion.",
     "meeting": "Prioriza escucha, resumen, decisiones y tareas pendientes.",
     "planning": "Prioriza pasos, riesgos, dependencias y memoria durable.",
     "study": "Observa lecturas/cursos, captura evidencia y construye notas en Obsidian.",
+    "english": "Practica conversacion en ingles, corrige errores y entrena fluidez.",
 }
 
 

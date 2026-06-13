@@ -6,7 +6,8 @@ sesion Gemini Live (que es la fuente de costo). Fail-fast con mensaje claro
 si falta algo. Importable como modulo o ejecutable como script (`python jarvis_health.py`).
 
 Verificaciones (orden):
-  1. Variables de entorno minimas (GEMINI_API_KEY, ANTHROPIC_API_KEY, vault).
+  1. Variables de entorno minimas (GEMINI_API_KEY, ANTHROPIC_API_KEY, vault)
+     y warning opcional para OPENAI_API_KEY / GPT 5.5 agentico.
   2. Audio de entrada (microfono detectable via sounddevice).
   3. Audio de salida (parlante/altavoz default).
   4. Vault Obsidian: existe, es directorio, escribible en memory_folder.
@@ -70,6 +71,26 @@ def _check_env() -> Check:
         )
     return Check(name="env", ok=True, detail="todas las vars criticas presentes",
                  elapsed_ms=(time.perf_counter() - t0) * 1000)
+
+
+def _check_agentic_code_env() -> Check:
+    t0 = time.perf_counter()
+    model = os.environ.get("JARVIS_AGENTIC_CODE_MODEL", "gpt-5.5")
+    if not os.environ.get("OPENAI_API_KEY"):
+        return Check(
+            name="agentic_code",
+            ok=False,
+            detail=f"OPENAI_API_KEY ausente; ask_gpt55_code no podra usar {model}",
+            elapsed_ms=(time.perf_counter() - t0) * 1000,
+            optional=True,
+        )
+    return Check(
+        name="agentic_code",
+        ok=True,
+        detail=f"ask_gpt55_code configurado con {model}",
+        elapsed_ms=(time.perf_counter() - t0) * 1000,
+        optional=True,
+    )
 
 
 def _check_mic() -> Check:
@@ -267,6 +288,7 @@ def run_healthcheck(strict: bool = True, ping_gemini: bool = False,
     t0 = time.perf_counter()
     checks = [
         _check_env(),
+        _check_agentic_code_env(),
         _check_data_dir(),
         _check_vault(),
         _check_mic(),

@@ -10,6 +10,15 @@ def test_mode_manager_accepts_known_modes():
     assert modes.get_mode()["mode"] == "coding"
 
 
+def test_mode_manager_accepts_english_mode():
+    modes = ModeManager()
+
+    result = modes.set_mode("english")
+
+    assert result["changed"] is True
+    assert modes.get_mode()["mode"] == "english"
+
+
 def test_mode_manager_rejects_unknown_modes():
     modes = ModeManager()
 
