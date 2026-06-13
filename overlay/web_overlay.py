@@ -7,6 +7,7 @@ tiny local SSE bridge built only with the Python standard library.
 
 from __future__ import annotations
 
+import base64
 import json
 import mimetypes
 import os
@@ -15,8 +16,8 @@ import secrets
 import struct
 import threading
 import time
-import tkinter as tk
 import webbrowser
+from dataclasses import dataclass, field
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -24,8 +25,27 @@ from typing import Any, Callable
 from urllib.parse import unquote, urlparse
 
 from jarvis_version import JARVIS_VERSION_LABEL
+from overlay.scheduler import UiScheduler
 from telemetry.budgets import BudgetGate, ProviderBudget
 from telemetry.tracker import TokenTracker
+
+
+@dataclass
+class ApprovalAction:
+    """Accion pendiente de aprobacion HITL en modo web."""
+    id: str
+    tool: str
+    args: dict[str, Any]
+    risk: str = "medium"
+    timeout_s: float = 30.0
+    title: str = ""
+    details: str = ""
+
+    def __post_init__(self) -> None:
+        if not self.title:
+            self.title = self.tool
+        if not self.details:
+            self.details = json.dumps(self.args, ensure_ascii=False)[:200]
 
 WEB_DIR = Path(__file__).resolve().parent / "web_ui"
 DEFAULT_HOST = "127.0.0.1"
@@ -222,14 +242,9 @@ class WebJarvisOverlay:
         self._last_audio_emit_ts = 0.0
         self._audio_emit_interval_s = _audio_emit_interval_from_env()
         self._closed = False
+        self._close_event = threading.Event()
         self._log_path = Path(__file__).resolve().parent.parent / "data" / "jarvis.log"
-
-        self.root = tk.Tk()
-        self.root.withdraw()
-        self.root.title(f"JARVIS {JARVIS_VERSION_LABEL} Web UI")
-
-        from overlay.camera_preview import CameraPreviewWindow
-        self._camera_preview = CameraPreviewWindow(self.root)
+        self._scheduler = UiScheduler(name="JarvisWebScheduler")
 
         self._server = self._start_server()
         self.url = f"http://{self._server.server_address[0]}:{self._server.server_address[1]}/"
@@ -241,9 +256,9 @@ class WebJarvisOverlay:
         self._server_thread.start()
 
         self.log_event("Web UI lista", "ok")
-        self.root.after(REFRESH_MS, self._refresh_runtime_panels)
+        self.after(REFRESH_MS, self._refresh_runtime_panels)
         if _env_truthy("JARVIS_WEB_UI_OPEN_BROWSER", True):
-            self.root.after(250, lambda: webbrowser.open(self.url))
+            self.after(250, lambda: webbrowser.open(self.url))
 
     @property
     def closed(self) -> bool:
@@ -273,6 +288,10 @@ class WebJarvisOverlay:
         if _env_truthy("JARVIS_HIDE_FROM_CAPTURE", False):
             return "Browser visible"
         return "Captura visible"
+
+    def after(self, delay_ms: int | float, fn: Callable[[], None]) -> int:
+        """Interfaz comun con JarvisOverlay.after(). Usa UiScheduler (headless)."""
+        return self._scheduler.after(delay_ms, fn)
 
     def register_client(self) -> queue.Queue[str]:
         client: queue.Queue[str] = queue.Queue(maxsize=256)
@@ -454,7 +473,7 @@ class WebJarvisOverlay:
                 "timeout_s": action.timeout_s,
             },
         )
-        self.root.after(int(action.timeout_s * 1000), lambda: self.resolve_web_approval(action.id, False))
+        self.after(int(action.timeout_s * 1000), lambda: self.resolve_web_approval(action.id, False))
 
     def resolve_web_approval(self, action_id: str, approved: bool) -> bool:
         callback = self._pending_approvals.pop(action_id, None)
@@ -472,32 +491,49 @@ class WebJarvisOverlay:
 
     def handle_web_command(self, command: str) -> bool:
         if command == "close":
-            self.root.after(0, self.close)
+            self.after(0, self.close)
             return True
         if command == "clearTranscripts":
-            self.root.after(0, self.reset_transcripts)
+            self.after(0, self.reset_transcripts)
             return True
         if command == "openDashboard":
-            self.root.after(0, self.open_dashboard)
+            self.after(0, self.open_dashboard)
             return True
         return False
 
-    # ---- Camera preview ----
+    # ---- Camera preview (SSE headless) ----
 
     def set_camera_active(self, active: bool) -> None:
-        """Muestra/oculta el preview e indica visualmente que la camara esta ON."""
-        if active:
-            self._camera_preview.show()
-            self.log_event("CAMARA ACTIVA (modo vision)", "warn")
-        else:
-            self._camera_preview.hide()
-            self.log_event("Camara apagada", "ok")
+        """Indica al frontend si la camara esta ON/OFF via SSE."""
+        level = "warn" if active else "ok"
+        msg = "CAMARA ACTIVA (modo vision)" if active else "Camara apagada"
+        self.log_event(msg, level)
+        self.emit("setCameraActive", active)
 
     def update_camera_preview(self, frame) -> None:
-        self._camera_preview.update_frame(frame.jpeg_bytes)
+        """Envia frame JPEG como base64 por SSE (throttle 4fps)."""
+        now = time.monotonic()
+        if now - self._last_audio_emit_ts < 0.25:  # 4fps max
+            return
+        self._last_audio_emit_ts = now
+        jpeg_b64 = base64.b64encode(frame.jpeg_bytes).decode("ascii")
+        self.emit("cameraFrame", jpeg_b64)
 
-    def set_camera_focus(self, box_px, label: str = "") -> None:
-        self._camera_preview.set_focus_box(box_px, label)
+    def set_camera_focus(self, box_px: Any, label: str = "") -> None:
+        """Envia bounding box de foco al frontend por SSE."""
+        self.emit("cameraFocus", {"box": box_px, "label": label})
+
+    def camera_look(self) -> None:
+        """Indica al frontend que se esta realizando una captura de camara."""
+        self.emit("setCameraActive", True)
+
+    def camera_watch_start(self) -> None:
+        """Indica al frontend que el modo watch esta activo."""
+        self.emit("setCameraActive", True)
+
+    def camera_watch_stop(self) -> None:
+        """Indica al frontend que el modo watch se detuvo."""
+        self.emit("setCameraActive", False)
 
     def toggle_compact(self) -> None:
         self.emit("toggleCompact")
@@ -510,22 +546,23 @@ class WebJarvisOverlay:
         if self._closed:
             return
         self._closed = True
+        self._close_event.set()
         try:
             self._on_close()
         finally:
+            try:
+                self._scheduler.shutdown(timeout_s=1.0)
+            except Exception:
+                pass
             try:
                 self._server.shutdown()
                 self._server.server_close()
             except Exception:
                 pass
-            try:
-                self.root.destroy()
-            except Exception:
-                pass
 
     def run(self) -> None:
         print(f"[web-ui] JARVIS disponible en {self.url}")
-        self.root.mainloop()
+        self._close_event.wait()
 
     def _start_server(self) -> _BridgeServer:
         host = os.environ.get("JARVIS_WEB_UI_HOST", DEFAULT_HOST)
@@ -548,7 +585,7 @@ class WebJarvisOverlay:
             self._notify_blocked_budgets()
         finally:
             try:
-                self.root.after(REFRESH_MS, self._refresh_runtime_panels)
+                self.after(REFRESH_MS, self._refresh_runtime_panels)
             except Exception:
                 pass
 
