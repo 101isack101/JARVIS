@@ -1,15 +1,18 @@
-import { useEffect, useMemo, useState } from 'react'
-import type { CSSProperties } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import type { CSSProperties, RefObject } from 'react'
 import {
   Bot, Camera, CirclePower, Cloud, Clock3, Download, Keyboard, MemoryStick,
-  Mic, RefreshCcw, Settings, Thermometer, Trash2, Wifi,
+  Mic, Power, RefreshCcw, Settings, Thermometer, Trash2, Wifi, X,
 } from 'lucide-react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import './index.css'
 import { useJarvis } from './useJarvis'
 import ApprovalModal from './components/ApprovalModal'
-import type { AgentToolEvent, AudioTelemetry, JarvisState, LogEvent } from './types'
+import type {
+  AgentToolEvent, AudioTelemetry, JarvisMode, JarvisState, LogEvent,
+  SystemStats as SystemStatsData, Weather,
+} from './types'
 
 const STATE_LABEL: Record<JarvisState, string> = {
   idle: 'Listening for wake word...',
@@ -106,43 +109,57 @@ function ProgressLine({ label, value, suffix = '%' }: { label: string; value: nu
   )
 }
 
-function SystemStats({ state, events, tools }: {
+function RefreshButton({ onClick }: { onClick: () => void }) {
+  return (
+    <button className="hud-refresh-button" type="button" title="Refresh" aria-label="Refresh" onClick={onClick}>
+      <RefreshCcw size={14} />
+    </button>
+  )
+}
+
+function SystemStats({ stats, state, events, tools, onRefresh }: {
+  stats: SystemStatsData | null
   state: JarvisState
   events: LogEvent[]
   tools: AgentToolEvent[]
+  onRefresh: () => void
 }) {
-  const cpu = STATE_LOAD[state]
-  const memory = Math.min(92, 34 + tools.filter(t => t.status === 'running').length * 14 + events.length)
-  const disk = 43
+  // Datos reales (psutil) cuando llegan; si la sesion aun no emite, caemos en
+  // una estimacion derivada del estado para no mostrar el panel vacio.
+  const cpu = stats ? stats.cpu : STATE_LOAD[state]
+  const ram = stats
+    ? stats.ram
+    : Math.min(92, 34 + tools.filter(t => t.status === 'running').length * 14 + events.length)
+  const diskLabel = stats ? `${stats.diskUsedGb}/${stats.diskTotalGb} GB` : '—'
 
   return (
-    <Panel title="System Stats" icon={MemoryStick} action={<RefreshCcw size={14} />}>
+    <Panel title="System Stats" icon={MemoryStick} action={<RefreshButton onClick={onRefresh} />}>
       <ProgressLine label="CPU Usage" value={cpu} />
-      <ProgressLine label="RAM Usage" value={memory} />
+      <ProgressLine label="RAM Usage" value={ram} />
       <div className="hud-stat-grid">
         <div><span>CPU</span><strong>{cpu}%</strong></div>
-        <div><span>Memory</span><strong>{memory}%</strong></div>
-        <div><span>Disk</span><strong>{disk}/475 GB</strong></div>
+        <div><span>Memory</span><strong>{ram}%</strong></div>
+        <div><span>Disk</span><strong>{diskLabel}</strong></div>
       </div>
     </Panel>
   )
 }
 
-function WeatherPanel() {
+function WeatherPanel({ weather, onRefresh }: { weather: Weather | null; onRefresh: () => void }) {
   return (
-    <Panel title="Weather" icon={Cloud} action={<RefreshCcw size={14} />}>
+    <Panel title="Weather" icon={Cloud} action={<RefreshButton onClick={onRefresh} />}>
       <div className="hud-weather">
         <div>
-          <div className="hud-temp">25.2°C</div>
-          <div className="hud-place">Quezon City, PH</div>
-          <div className="hud-muted">overcast clouds</div>
+          <div className="hud-temp">{weather ? `${weather.tempC}°C` : '—'}</div>
+          <div className="hud-place">{weather ? weather.place : 'Locating…'}</div>
+          <div className="hud-muted">{weather ? weather.desc : 'fetching weather…'}</div>
         </div>
         <Cloud className="hud-weather-icon" size={44} />
       </div>
       <div className="hud-stat-grid">
-        <div><span>Humidity</span><strong>94%</strong></div>
-        <div><span>Wind</span><strong>5.8 m/s</strong></div>
-        <div><span>Feels Like</span><strong>26.3°C</strong></div>
+        <div><span>Humidity</span><strong>{weather ? `${weather.humidity}%` : '—'}</strong></div>
+        <div><span>Wind</span><strong>{weather ? `${weather.windMs} m/s` : '—'}</strong></div>
+        <div><span>Feels Like</span><strong>{weather ? `${weather.feelsC}°C` : '—'}</strong></div>
       </div>
     </Panel>
   )
@@ -253,13 +270,24 @@ function CoreOrb({ state, audioTelemetry }: { state: JarvisState; audioTelemetry
   )
 }
 
-function Conversation({ input, output, onClear, onExtract }: {
+function Conversation({ input, output, onClear, onExtract, onSend, inputRef, canSend }: {
   input: string
   output: string
   onClear: () => void
   onExtract: () => void
+  onSend: (text: string) => void
+  inputRef: RefObject<HTMLInputElement | null>
+  canSend: boolean
 }) {
   const hasContent = input || output
+  const [draft, setDraft] = useState('')
+
+  const submit = () => {
+    const text = draft.trim()
+    if (!text || !canSend) return
+    onSend(text)
+    setDraft('')
+  }
 
   return (
     <aside className="hud-conversation">
@@ -293,15 +321,66 @@ function Conversation({ input, output, onClear, onExtract }: {
           </div>
         )}
       </div>
-      <div className="hud-input-row">
-        <input placeholder="Type a message..." aria-label="Message" />
-        <button type="button" title="Send" aria-label="Send">Send</button>
-      </div>
+      <form
+        className="hud-input-row"
+        onSubmit={(e) => { e.preventDefault(); submit() }}
+      >
+        <input
+          ref={inputRef}
+          value={draft}
+          onChange={(e) => setDraft(e.target.value)}
+          placeholder={canSend ? 'Type a message...' : 'Connecting to JARVIS...'}
+          aria-label="Message"
+          disabled={!canSend}
+        />
+        <button type="submit" title="Send" aria-label="Send" disabled={!canSend || !draft.trim()}>
+          Send
+        </button>
+      </form>
     </aside>
   )
 }
 
-function TopBar({ version, online, now }: { version: string; online: boolean; now: Date }) {
+function SettingsMenu({ version, online, mode, connectionDetail, onClose, onShutdown }: {
+  version: string
+  online: boolean
+  mode: JarvisMode
+  connectionDetail: string
+  onClose: () => void
+  onShutdown: () => void
+}) {
+  return (
+    <>
+      <div className="hud-settings-backdrop" onClick={onClose} />
+      <div className="hud-settings-menu" role="dialog" aria-label="Settings">
+        <header>
+          <span>Settings</span>
+          <button type="button" title="Close" aria-label="Close" onClick={onClose}><X size={14} /></button>
+        </header>
+        <dl className="hud-settings-grid">
+          <dt>Version</dt><dd>{version || '—'}</dd>
+          <dt>Connection</dt><dd>{online ? 'Online' : (connectionDetail || 'Offline')}</dd>
+          <dt>Listen mode</dt><dd>{mode}</dd>
+        </dl>
+        <button type="button" className="hud-settings-danger" onClick={onShutdown}>
+          <Power size={14} /> Shutdown JARVIS
+        </button>
+      </div>
+    </>
+  )
+}
+
+function TopBar({ version, online, now, mode, connectionDetail, weather, settingsOpen, onToggleSettings, onShutdown }: {
+  version: string
+  online: boolean
+  now: Date
+  mode: JarvisMode
+  connectionDetail: string
+  weather: Weather | null
+  settingsOpen: boolean
+  onToggleSettings: () => void
+  onShutdown: () => void
+}) {
   return (
     <header className="hud-topbar">
       <div className="hud-brand">
@@ -320,25 +399,60 @@ function TopBar({ version, online, now }: { version: string; online: boolean; no
       <div className="hud-top-right">
         <div className="hud-top-chip">
           <Thermometer size={14} />
-          <span>25.2°C</span>
-          <small>Quezon City</small>
+          <span>{weather ? `${weather.tempC}°C` : '—'}</span>
+          <small>{weather ? weather.place.split(',')[0] : '…'}</small>
         </div>
-        <MiniButton title="Settings"><Settings size={18} /></MiniButton>
+        <div className="hud-settings-anchor">
+          <button
+            className={`hud-icon-button${settingsOpen ? ' hud-icon-button-on' : ''}`}
+            type="button" title="Settings" aria-label="Settings"
+            aria-expanded={settingsOpen} onClick={onToggleSettings}
+          >
+            <Settings size={18} />
+          </button>
+          {settingsOpen && (
+            <SettingsMenu
+              version={version} online={online} mode={mode} connectionDetail={connectionDetail}
+              onClose={onToggleSettings} onShutdown={onShutdown}
+            />
+          )}
+        </div>
       </div>
       <span className="hud-version">{version}</span>
     </header>
   )
 }
 
-function BottomControls({ onCamera, onMic }: { onCamera: () => void; onMic: () => void }) {
+function BottomControls({ onCamera, onMic, onKeyboard, cameraActive, mode }: {
+  onCamera: () => void
+  onMic: () => void
+  onKeyboard: () => void
+  cameraActive: boolean
+  mode: JarvisMode
+}) {
+  const micTitle = mode === 'LIBRE' ? 'Listening mode: LIBRE (click for PTT)' : 'Push-to-talk (click for LIBRE)'
   return (
     <div className="hud-bottom-controls">
-      <MiniButton title="Camera" onClick={onCamera}><Camera size={22} /></MiniButton>
+      <button
+        className={`hud-icon-button${cameraActive ? ' hud-icon-button-on' : ''}`}
+        type="button" title="Toggle camera" aria-label="Toggle camera"
+        aria-pressed={cameraActive} onClick={onCamera}
+      >
+        <Camera size={22} />
+      </button>
       <div className="hud-mic-stack">
-        <MiniButton title="Microphone" onClick={onMic}><Mic size={22} /></MiniButton>
-        <div className="hud-dots"><span /><span /><span /><span /></div>
+        <button
+          className={`hud-icon-button${mode === 'LIBRE' ? ' hud-icon-button-on' : ''}`}
+          type="button" title={micTitle} aria-label={micTitle}
+          aria-pressed={mode === 'LIBRE'} onClick={onMic}
+        >
+          <Mic size={22} />
+        </button>
+        <div className={`hud-dots${mode === 'LIBRE' ? ' hud-dots-live' : ''}`}>
+          <span /><span /><span /><span />
+        </div>
       </div>
-      <MiniButton title="Keyboard"><Keyboard size={22} /></MiniButton>
+      <MiniButton title="Focus message box" onClick={onKeyboard}><Keyboard size={22} /></MiniButton>
     </div>
   )
 }
@@ -346,10 +460,19 @@ function BottomControls({ onCamera, onMic }: { onCamera: () => void; onMic: () =
 export default function App() {
   const { ui, sendCommand, resolveApproval } = useJarvis()
   const { now, uptimeMs } = useClock()
+  const inputRef = useRef<HTMLInputElement>(null)
+  const [settingsOpen, setSettingsOpen] = useState(false)
+  const connected = ui.connectionStatus === 'connected'
   const commands = useMemo(
     () => ui.agentTools.filter(t => t.status !== 'running').length,
     [ui.agentTools],
   )
+
+  // Todo comando hacia el backend requiere el token de UI del snapshot. Si aun
+  // no llego (sesion arrancando), el control queda inerte en vez de fallar.
+  const dispatch = (command: string, args: Record<string, unknown> = {}) => {
+    if (ui.uiToken) void sendCommand(command, ui.uiToken, args)
+  }
 
   const approve = () => {
     if (ui.pendingApproval) resolveApproval(ui.pendingApproval.id, true, ui.uiToken)
@@ -359,26 +482,44 @@ export default function App() {
     if (ui.pendingApproval) resolveApproval(ui.pendingApproval.id, false, ui.uiToken)
   }
 
-  const clearConversation = () => {
-    if (ui.uiToken) sendCommand('clearTranscripts', ui.uiToken)
-  }
+  const clearConversation = () => dispatch('clearTranscripts')
 
   const extractConversation = () => {
     const text = [`Isaac:\n${ui.inputTranscript}`, `JARVIS:\n${ui.outputTranscript}`].join('\n\n')
     void navigator.clipboard?.writeText(text)
   }
 
-  const triggerCamera = () => {
-    if (ui.uiToken) sendCommand('openDashboard', ui.uiToken)
-  }
+  const sendText = (text: string) => dispatch('sendText', { text })
+  const toggleMic = () => dispatch('toggleMode')
+  const toggleCamera = () => dispatch('toggleCamera')
+  const refreshStats = () => dispatch('refreshStats')
+  const refreshWeather = () => dispatch('refreshWeather')
+  const shutdown = () => { dispatch('close'); setSettingsOpen(false) }
+  const focusInput = () => inputRef.current?.focus()
 
   return (
     <div className="hud-shell">
-      <TopBar version={ui.version || 'v1.02'} online={ui.connectionStatus === 'connected'} now={now} />
+      <TopBar
+        version={ui.version || 'v1.03'}
+        online={connected}
+        now={now}
+        mode={ui.mode}
+        connectionDetail={ui.connectionDetail}
+        weather={ui.weather}
+        settingsOpen={settingsOpen}
+        onToggleSettings={() => setSettingsOpen(o => !o)}
+        onShutdown={shutdown}
+      />
       <div className="hud-layout">
         <aside className="hud-left">
-          <SystemStats state={ui.state} events={ui.events} tools={ui.agentTools} />
-          <WeatherPanel />
+          <SystemStats
+            stats={ui.systemStats}
+            state={ui.state}
+            events={ui.events}
+            tools={ui.agentTools}
+            onRefresh={refreshStats}
+          />
+          <WeatherPanel weather={ui.weather} onRefresh={refreshWeather} />
           <CameraWidget active={ui.cameraActive} frame={ui.cameraFrame} focus={ui.cameraFocus} />
           <UptimePanel uptimeMs={uptimeMs} commands={commands} />
         </aside>
@@ -388,9 +529,18 @@ export default function App() {
           output={ui.outputTranscript}
           onClear={clearConversation}
           onExtract={extractConversation}
+          onSend={sendText}
+          inputRef={inputRef}
+          canSend={connected}
         />
       </div>
-      <BottomControls onCamera={triggerCamera} onMic={() => undefined} />
+      <BottomControls
+        onCamera={toggleCamera}
+        onMic={toggleMic}
+        onKeyboard={focusInput}
+        cameraActive={ui.cameraActive}
+        mode={ui.mode}
+      />
       <ApprovalModal approval={ui.pendingApproval} onApprove={approve} onReject={reject} />
     </div>
   )

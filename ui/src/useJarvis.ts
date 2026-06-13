@@ -3,7 +3,7 @@ import type { Dispatch, SetStateAction } from 'react'
 import type {
   JarvisState, JarvisMode, ConnectionStatus, LogEvent,
   BudgetPayload, MemoryStats, AgentToolEvent, AudioTelemetry,
-  ApprovalPayload, JarvisSnapshot,
+  ApprovalPayload, JarvisSnapshot, SystemStats, Weather,
 } from './types'
 
 export interface JarvisUIState {
@@ -25,6 +25,8 @@ export interface JarvisUIState {
   cameraActive: boolean
   cameraFrame: string | null        // base64 JPEG
   cameraFocus: { box: unknown; label: string } | null
+  systemStats: SystemStats | null
+  weather: Weather | null
 }
 
 const INITIAL: JarvisUIState = {
@@ -46,6 +48,8 @@ const INITIAL: JarvisUIState = {
   cameraActive: false,
   cameraFrame: null,
   cameraFocus: null,
+  systemStats: null,
+  weather: null,
 }
 
 type UiDispatch = Dispatch<SetStateAction<JarvisUIState>>
@@ -90,6 +94,8 @@ function applyCommand(set: UiDispatch, command: string, args: unknown[]) {
           cameraActive: Boolean(snap.cameraActive),
           cameraFrame: snap.cameraFrame ?? null,
           cameraFocus: snap.cameraFocus ?? null,
+          systemStats: snap.systemStats && Object.keys(snap.systemStats).length ? snap.systemStats : null,
+          weather: snap.weather && Object.keys(snap.weather).length ? snap.weather : null,
         }
       }
       case 'setState':     return { ...prev, state: args[0] as JarvisState }
@@ -145,6 +151,8 @@ function applyCommand(set: UiDispatch, command: string, args: unknown[]) {
       }
       case 'cameraFrame':     return { ...prev, cameraActive: true, cameraFrame: args[0] as string }
       case 'cameraFocus':     return { ...prev, cameraFocus: args[0] as { box: unknown; label: string } }
+      case 'systemStats':     return { ...prev, systemStats: args[0] as SystemStats }
+      case 'weather':         return { ...prev, weather: args[0] as Weather }
       default: return prev
     }
   })
@@ -191,13 +199,16 @@ export function useJarvis() {
     }
   }, [connect])
 
-  const sendCommand = useCallback(async (command: string, token: string) => {
-    await fetch('/command', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-Jarvis-Ui-Token': token },
-      body: JSON.stringify({ command }),
-    })
-  }, [])
+  const sendCommand = useCallback(
+    async (command: string, token: string, args: Record<string, unknown> = {}) => {
+      await fetch('/command', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Jarvis-Ui-Token': token },
+        body: JSON.stringify({ command, args }),
+      })
+    },
+    [],
+  )
 
   const resolveApproval = useCallback(async (id: string, approved: boolean, token: string) => {
     await fetch('/approval', {

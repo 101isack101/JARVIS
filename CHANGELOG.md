@@ -25,6 +25,40 @@ Todas las versiones relevantes de JARVIS se documentan aqui.
 - Planes persistidos en `data/file_organizer/plans/` y aplicacion con aprobacion HITL.
 - Sin borrado, sin overwrite, bloqueo de secretos/directorios internos y movimientos cross-volume.
 
+## v1.03 - UI 100% funcional + nucleo de energia
+
+Fecha: 2026-06-13
+
+### Nucleo de energia
+
+- Rediseno del orb central como reactor de plasma reactivo a la voz: centro
+  blanco-incandescente que palpita, vortices de gas contrarrotantes con luz
+  aditiva (`mix-blend-mode: screen` + blur), filamentos electricos y un bloom
+  que se expande/contrae segun `--voice-energy` (telemetria de audio).
+
+### Controles de la UI ahora funcionales (antes decorativos)
+
+- Caja de texto + `Send` (Enter o boton): inyecta un turno real en la sesion
+  Gemini via `sendText` -> `JarvisSession.send_text`. Se deshabilita sin conexion.
+- Boton `Mic`: alterna PTT <-> LIBRE (`toggleMode` -> `_apply_listen_mode`).
+- Boton `Keyboard`: enfoca la caja de mensaje.
+- Boton `Settings`: popover con version, conexion, modo y "Shutdown JARVIS".
+- Boton `Camera`: toggle real de captura (`toggleCamera` -> `_on_capture_camera`).
+- Botones `Refresh` de System Stats y Weather: re-piden datos al backend.
+
+### Datos reales (antes hardcodeados)
+
+- System Stats: CPU/RAM/Disco reales via `psutil`, empujados por snapshot/SSE.
+- Weather: clima real via Open-Meteo + geolocalizacion por IP (sin API key),
+  en hilo daemon con timeout y fallback. Override con `JARVIS_WEATHER_LAT/LON/PLACE`
+  y desactivable con `JARVIS_WEATHER=false`.
+
+### Puente UI<->backend
+
+- `/command` ahora acepta `args` (payload); `sendCommand(command, token, args)`.
+- Dispatcher `Jarvis._on_ui_command` enruta comandos de la UI web a callbacks
+  existentes; el overlay clasico Tkinter los ignora con gracia.
+
 ## v1.02 - Vision por camara
 
 Fecha: 2026-06-07
