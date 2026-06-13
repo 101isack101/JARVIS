@@ -47,7 +47,9 @@ class ApprovalAction:
         if not self.details:
             self.details = json.dumps(self.args, ensure_ascii=False)[:200]
 
-WEB_DIR = Path(__file__).resolve().parent / "web_ui"
+_WEB_DIST = Path(__file__).resolve().parent / "web_dist"
+_WEB_FALLBACK = Path(__file__).resolve().parent / "web_ui"
+WEB_DIR = _WEB_DIST if _WEB_DIST.is_dir() else _WEB_FALLBACK
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8765
 REFRESH_MS = 500
