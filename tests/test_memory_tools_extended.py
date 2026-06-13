@@ -91,6 +91,59 @@ def test_dispatcher_exposes_claude_and_modes(tmp_path):
     assert security["kill_switch"]["behavior"] == "hard exit via os._exit(130)"
 
 
+def test_open_obsidian_opens_configured_vault(tmp_path, monkeypatch):
+    opened = []
+    monkeypatch.setattr("memory.tools._launch_system_uri", lambda uri: opened.append(uri) or True)
+    vault = ObsidianVault(tmp_path, read_all=True)
+    rag = VaultRAG(vault=vault, index_dir=tmp_path / "rag")
+    ctx = ToolContext(vault=vault, rag=rag)
+    dispatcher = ToolDispatcher(ctx)
+
+    result = dispatcher.call("jarvis_open_obsidian", {})
+
+    assert result["ok"] is True
+    assert result["executed"] is True
+    assert opened == [f"obsidian://open?vault={tmp_path.name}"]
+    assert "jarvis_open_obsidian" in dispatcher.tool_names
+
+
+def test_open_obsidian_opens_note_by_absolute_path_uri(tmp_path, monkeypatch):
+    opened = []
+    monkeypatch.setattr("memory.tools._launch_system_uri", lambda uri: opened.append(uri) or True)
+    vault = ObsidianVault(tmp_path, read_all=True)
+    note = tmp_path / "Jarvis Memory" / "Daily Note.md"
+    note.write_text("# Daily\n", encoding="utf-8")
+    rag = VaultRAG(vault=vault, index_dir=tmp_path / "rag")
+    ctx = ToolContext(vault=vault, rag=rag)
+    dispatcher = ToolDispatcher(ctx)
+
+    result = dispatcher.call(
+        "jarvis_open_obsidian",
+        {"path": "Jarvis Memory/Daily Note", "pane_type": "tab"},
+    )
+
+    assert result["ok"] is True
+    assert result["path"] == "Jarvis Memory/Daily Note.md"
+    assert opened[0].startswith("obsidian://open?path=")
+    assert "paneType=tab" in opened[0]
+
+
+def test_open_obsidian_records_missing_note_error(tmp_path, monkeypatch):
+    journal = tmp_path / "errors.jsonl"
+    monkeypatch.setenv("JARVIS_ERROR_JOURNAL_PATH", str(journal))
+    monkeypatch.setattr("memory.tools._launch_system_uri", lambda uri: True)
+    vault = ObsidianVault(tmp_path, read_all=True)
+    rag = VaultRAG(vault=vault, index_dir=tmp_path / "rag")
+    ctx = ToolContext(vault=vault, rag=rag)
+    dispatcher = ToolDispatcher(ctx)
+
+    result = dispatcher.call("jarvis_open_obsidian", {"path": "Missing Node"})
+
+    assert result["ok"] is False
+    assert "nota no existe" in result["error"]
+    assert '"source":"obsidian.open"' in journal.read_text(encoding="utf-8")
+
+
 def test_run_safe_command_rejects_legacy_shell_command(tmp_path):
     vault = ObsidianVault(tmp_path, read_all=True)
     rag = VaultRAG(vault=vault, index_dir=tmp_path / "rag")

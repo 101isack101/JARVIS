@@ -5,6 +5,7 @@ from overlay.web_overlay import (
     _BridgeHandler,
     _audio_emit_interval_from_env,
     _provider_payload,
+    resolve_web_dir,
 )
 
 
@@ -47,6 +48,16 @@ def test_audio_visual_interval_defaults_to_30_fps(monkeypatch):
 
     monkeypatch.setenv("JARVIS_WEB_UI_AUDIO_FPS", "invalid")
     assert _audio_emit_interval_from_env() == 1 / 30
+
+
+def test_resolve_web_dir_honors_env_override(tmp_path, monkeypatch):
+    web_dir = tmp_path / "ui"
+    web_dir.mkdir()
+    (web_dir / "index.html").write_text("<html></html>", encoding="utf-8")
+
+    monkeypatch.setenv("JARVIS_WEB_UI_DIR", str(web_dir))
+
+    assert resolve_web_dir() == web_dir
 
 
 def test_bridge_post_authorization_requires_session_token():

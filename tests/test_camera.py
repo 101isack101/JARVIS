@@ -36,6 +36,24 @@ def _factory(opened=True):
     return lambda index: FakeDevice(opened=opened)
 
 
+def test_auto_index_tries_until_a_camera_opens(tmp_path, monkeypatch):
+    calls = []
+
+    def factory(index):
+        calls.append(index)
+        return FakeDevice(opened=index == 2)
+
+    monkeypatch.setenv("JARVIS_CAMERA_INDEX", "auto")
+    monkeypatch.setenv("JARVIS_CAMERA_SCAN_MAX", "4")
+    cam = CameraCapture(out_dir=tmp_path, device_factory=factory)
+
+    frame = cam.capture()
+
+    assert isinstance(frame, CameraFrame)
+    assert calls == [0, 1, 2]
+    assert cam.index == 2
+
+
 def test_capture_returns_valid_frame(tmp_path):
     cam = CameraCapture(out_dir=tmp_path, index=0, device_factory=_factory())
     frame = cam.capture()
@@ -48,8 +66,10 @@ def test_capture_returns_valid_frame(tmp_path):
 
 def test_capture_device_not_opened_raises(tmp_path):
     cam = CameraCapture(out_dir=tmp_path, index=0, device_factory=_factory(opened=False))
-    with pytest.raises(RuntimeError):
+    with pytest.raises(RuntimeError) as err:
         cam.capture()
+    assert "Intentos OpenCV" in str(err.value)
+    assert "JARVIS_CAMERA_INDEX=auto" in str(err.value)
 
 
 def test_capture_releases_device_in_ondemand(tmp_path):

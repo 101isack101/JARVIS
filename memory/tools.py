@@ -19,14 +19,17 @@ from __future__ import annotations
 
 import os
 import re
+import webbrowser
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
+from urllib.parse import quote
 
 from google.genai import types
 
 from security.policy import SECRET_FILENAMES, SECRET_SUFFIXES
+from telemetry.error_journal import record_error
 
 from . import notes as notes_mod
 from .context_assembler import build_project_context
@@ -686,6 +689,31 @@ JARVIS_OPEN_URL_DECL = types.FunctionDeclaration(
     ),
 )
 
+JARVIS_OPEN_OBSIDIAN_DECL = types.FunctionDeclaration(
+    name="jarvis_open_obsidian",
+    description=(
+        "Abre Obsidian en el vault configurado de Isaac, o abre una nota concreta "
+        "dentro del vault. Usala cuando Isaac pida abrir Obsidian, mostrar una nota, "
+        "ver un nodo, o despues de crear/actualizar documentacion si quiere verla."
+    ),
+    parameters=types.Schema(
+        type=types.Type.OBJECT,
+        properties={
+            "path": types.Schema(
+                type=types.Type.STRING,
+                description=(
+                    "Path relativo de la nota dentro del vault. Opcional; si se omite "
+                    "solo abre/enfoca el vault. Puede incluir o no .md."
+                ),
+            ),
+            "pane_type": types.Schema(
+                type=types.Type.STRING,
+                description="Opcional: tab, split o window para abrir la nota.",
+            ),
+        },
+    ),
+)
+
 JARVIS_SET_MODE_DECL = types.FunctionDeclaration(
     name="jarvis_set_mode",
     description=(
@@ -923,6 +951,7 @@ def all_function_declarations() -> list[types.FunctionDeclaration]:
         JARVIS_RUN_SAFE_COMMAND_DECL,
         JARVIS_OPEN_POWERSHELL_DECL,
         JARVIS_OPEN_URL_DECL,
+        JARVIS_OPEN_OBSIDIAN_DECL,
         JARVIS_SET_MODE_DECL,
         JARVIS_GET_MODE_DECL,
         JARVIS_LISTEN_MODE_DECL,
@@ -1850,6 +1879,95 @@ def jarvis_open_url(ctx: ToolContext, url: str | None = None) -> dict:
     return ctx.actions.open_url(url=url)
 
 
+def _launch_system_uri(uri: str) -> bool:
+    if os.name == "nt" and hasattr(os, "startfile"):
+        os.startfile(uri)  # type: ignore[attr-defined]
+        return True
+    return bool(webbrowser.open(uri, new=2))
+
+
+def _resolve_obsidian_note_path(vault: ObsidianVault, path: str) -> Path:
+    rel = (path or "").strip().replace("\\", "/").strip("/")
+    if not rel:
+        raise VaultError("path de nota vacio")
+    target = (vault.vault_path / rel).resolve()
+    if not target.exists() and target.suffix == "":
+        target = target.with_suffix(".md")
+    vault.assert_readable(target)
+    if not target.exists():
+        raise VaultError(f"nota no existe: {rel}")
+    if not target.is_file():
+        raise VaultError(f"path no es una nota/archivo: {rel}")
+    return target
+
+
+def jarvis_open_obsidian(
+    ctx: ToolContext,
+    path: str | None = None,
+    pane_type: str | None = None,
+) -> dict:
+    """Abre Obsidian mediante su URI oficial sin exponer shell libre."""
+    try:
+        params: list[str]
+        target_path: Path | None = None
+        if path:
+            target_path = _resolve_obsidian_note_path(ctx.vault, path)
+            params = [f"path={quote(str(target_path), safe='')}"]
+        else:
+            params = [f"vault={quote(ctx.vault.vault_path.name, safe='')}"]
+
+        pane = (pane_type or "").strip().lower()
+        if pane:
+            if pane not in {"tab", "split", "window"}:
+                record_error(
+                    "obsidian.open",
+                    message=f"pane_type invalido: {pane_type}",
+                    severity="warning",
+                    context={"path": path, "pane_type": pane_type},
+                )
+                return {
+                    "ok": False,
+                    "executed": False,
+                    "error": f"pane_type invalido: {pane_type}",
+                    "valid_pane_types": ["tab", "split", "window"],
+                }
+            params.append(f"paneType={pane}")
+
+        uri = "obsidian://open?" + "&".join(params)
+        executed = _launch_system_uri(uri)
+        if not executed:
+            record_error(
+                "obsidian.open",
+                message="el sistema no confirmo apertura del URI obsidian",
+                context={"uri": uri, "path": path, "pane_type": pane_type},
+            )
+        return {
+            "ok": bool(executed),
+            "executed": bool(executed),
+            "uri": uri,
+            "vault": str(ctx.vault.vault_path),
+            "path": str(target_path.relative_to(ctx.vault.vault_path)).replace("\\", "/")
+            if target_path
+            else None,
+            "message": "Obsidian solicitado al sistema",
+        }
+    except Exception as exc:
+        record_error(
+            "obsidian.open",
+            exc=exc,
+            context={
+                "path": path,
+                "pane_type": pane_type,
+                "vault": str(getattr(ctx.vault, "vault_path", "")),
+            },
+        )
+        return {
+            "ok": False,
+            "executed": False,
+            "error": f"{type(exc).__name__}: {exc}",
+        }
+
+
 def jarvis_open_powershell(ctx: ToolContext, cwd: str | None = None) -> dict:
     if ctx.actions is None:
         return {"executed": False, "error": "SafeActionExecutor no configurado"}
@@ -2232,7 +2350,22 @@ def obsidian_mcp(ctx: ToolContext, operation: str, **kwargs) -> dict:
     denied = _require_mcp_approval(ctx, op, args)
     if denied is not None:
         return denied
-    return ctx.obsidian_mcp.call_tool(tool_name, args)
+    try:
+        result = ctx.obsidian_mcp.call_tool(tool_name, args)
+    except Exception as exc:
+        record_error(
+            "obsidian.mcp",
+            exc=exc,
+            context={"operation": op, "tool": tool_name, "args": args},
+        )
+        raise
+    if isinstance(result, dict) and result.get("ok") is False:
+        record_error(
+            "obsidian.mcp",
+            message=str(result.get("error") or "operacion MCP fallo"),
+            context={"operation": op, "tool": tool_name, "args": args, "result": result},
+        )
+    return result
 
 
 # =====================================================================
@@ -2263,6 +2396,7 @@ class ToolDispatcher:
             "jarvis_run_safe_command": lambda **kw: jarvis_run_safe_command(ctx, **kw),
             "jarvis_open_powershell": lambda **kw: jarvis_open_powershell(ctx, **kw),
             "jarvis_open_url": lambda **kw: jarvis_open_url(ctx, **kw),
+            "jarvis_open_obsidian": lambda **kw: jarvis_open_obsidian(ctx, **kw),
             "jarvis_set_mode": lambda **kw: jarvis_set_mode(ctx, **kw),
             "jarvis_get_mode": lambda **kw: jarvis_get_mode(ctx),
             "jarvis_listen_mode": lambda **kw: jarvis_listen_mode(ctx, **kw),

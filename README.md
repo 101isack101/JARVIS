@@ -4,7 +4,28 @@ Asistente estilo Gemini Live con voz bidireccional, visión de pantalla, compute
 
 > **Status:** Copiloto local funcional. Voz bidireccional, overlay, hotkeys, memoria RAG, Claude tool, vision/screen capture, action executor seguro, modos, telemetry y budgets ya existen.
 
-> **Version actual:** v1.02
+> **Version actual:** v1.10 — UI Tauri + React (produccion)
+
+---
+
+## Lanzar JARVIS
+
+**Doble clic en el icono del escritorio** (`JARVIS.lnk` → `jarvis-desktop.exe`).
+
+Esto arranca el shell Tauri que:
+
+1. Spawnea `jarvis.py` con `JARVIS_UI=web JARVIS_SUPERVISED=1`
+2. Espera hasta 45 s a que el bridge HTTP levante en `127.0.0.1:8765`
+3. Abre la ventana React (1380×860) apuntando al bridge
+
+> **Primera carga:** ~30 segundos mientras JARVIS carga modelos (VAD, embeddings, Obsidian). La ventana aparece cuando el backend está listo.
+
+### Modo legacy (tkinter)
+
+```powershell
+& "H:\Python311\python.exe" jarvis.py
+# o doble clic en jarvis_run.bat (sin JARVIS_UI=web)
+```
 
 ---
 
@@ -13,7 +34,8 @@ Asistente estilo Gemini Live con voz bidireccional, visión de pantalla, compute
 - **Gemini Live** (`google-genai`): voz speech-to-speech nativo, barge-in, vision
 - **GPT 5.5** (`openai`): tool `ask_gpt55_code` para generar codigo, debugging, arquitectura de software y modo agentico
 - **Claude 4.6 Sonnet** (`anthropic`): tool `ask_claude_deep` para razonamiento profundo general y fallback
-- **Overlay tkinter**: interfaz principal, invisible a Zoom/Teams via `WDA_EXCLUDEFROMCAPTURE`
+- **UI Tauri + React** (`jarvis-desktop.exe`): ventana nativa con React 19 + Tailwind v4 + framer-motion, SSE bridge headless
+- **Overlay tkinter** (legacy): interfaz clasica, invisible a Zoom/Teams via `WDA_EXCLUDEFROMCAPTURE`
 - **Vision**: `Ctrl+Shift+S`, `Ctrl+Alt+S` y tool `screen_look` capturan pantalla/region para Gemini
 - **Computer use seguro**: `actions/` con operaciones read-only estructuradas y validacion de rutas
 - **File Organizer seguro**: planifica y mueve archivos locales con whitelist de roots, manifiesto y aprobacion HITL
@@ -101,7 +123,7 @@ Ejecutar los dos spikes en orden. Ambos deberían terminar en <30s.
 - **Hecho:** Recall temporal de sesiones (`jarvis_session_recall`) para "ayer", "anoche" y conversaciones previas
 - **Hecho:** Retención automática de screenshots vía `JARVIS_SCREENSHOT_RETENTION_HOURS`
 - **Hecho:** English Practice Mode activable por voz con `english_practice`
-- **Hecho:** UI web premium v1.00 disponible como opcion con `JARVIS_UI=web`
+- **Hecho:** UI Tauri + React 19 como modo principal (`jarvis-desktop.exe`): SSE bridge headless, watchdog anti-zombie, ApprovalModal HITL, CameraPanel live, Transcript markdown, Telemetry SVG
 - **Pendiente:** Autopilot con confirmaciones y acciones de escritura controladas
 - **Pendiente:** Dashboard/log viewer para inspeccionar decisiones de Jarvis
 
@@ -114,7 +136,7 @@ Ejecutar los dos spikes en orden. Ambos deberían terminar en <30s.
 - **Comandos:** Gemini solo ve operaciones estructuradas (`list_dir`, `read_file`, `search_text`, `git_status`, etc.); PowerShell libre no se expone como tool conversacional.
 - **Organizacion de archivos:** `file_organizer` solo opera sobre roots permitidos (`JARVIS_ORGANIZER_ROOTS` o carpetas de usuario por defecto), crea un plan revisable y solo aplica movimientos con aprobacion HITL. No borra, no sobrescribe, bloquea secretos/directorios internos y evita movimientos entre discos.
 - **Secretos:** RAG/indexer omiten paths sensibles (`.env`, `.pem`, keys, credenciales) y redactan patrones de API keys antes de indexar o responder.
-- **Logs:** tool arguments y mensajes largos se redactan/truncan antes de escribirse en `data/jarvis.log`.
+- **Logs:** tool arguments y mensajes largos se redactan/truncan antes de escribirse en `data/jarvis.log`; errores operativos quedan además en `data/error_journal.jsonl` para trazabilidad y bug hunt.
 - **Screenshots:** las capturas en `data/screenshots` se limpian automáticamente según `JARVIS_SCREENSHOT_RETENTION_HOURS` (24h por defecto).
 - **Kill-switch:** `Ctrl+Alt+Q` usa salida dura (`os._exit(130)`) para matar Jarvis sin esperar threads/asyncio.
 - **Borrado Obsidian:** `delete_path` requiere `JARVIS_OBSIDIAN_MCP_ALLOW_DELETE=true` y, desde Jarvis, aprobacion HITL. Mantenerlo en `false` por defecto.
