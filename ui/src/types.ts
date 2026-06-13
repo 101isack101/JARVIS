@@ -53,6 +53,26 @@ export interface AudioTelemetry {
   stamp?: string
 }
 
+export interface SystemStats {
+  cpu: number
+  ram: number
+  ramUsedGb: number
+  ramTotalGb: number
+  diskUsedGb: number
+  diskTotalGb: number
+  diskPct: number
+}
+
+export interface Weather {
+  tempC: number
+  feelsC: number
+  humidity: number
+  windMs: number
+  place: string
+  desc: string
+  code: number
+}
+
 export interface ApprovalPayload {
   id: string
   risk: 'low' | 'medium' | 'high'
@@ -79,4 +99,6 @@ export interface JarvisSnapshot {
   cameraActive?: boolean
   cameraFrame?: string | null
   cameraFocus?: { box: unknown; label: string } | null
+  systemStats?: SystemStats | null
+  weather?: Weather | null
 }

@@ -29,6 +29,22 @@ from overlay.scheduler import UiScheduler
 from telemetry.budgets import BudgetGate, ProviderBudget
 from telemetry.tracker import TokenTracker
 
+try:  # psutil es opcional; sin el, System Stats queda vacio (UI usa fallback)
+    import psutil
+except Exception:  # pragma: no cover - entorno sin psutil
+    psutil = None  # type: ignore[assignment]
+
+# Mapa de codigos WMO (Open-Meteo) a descripcion corta para el panel Weather.
+_WMO_DESC = {
+    0: "clear sky", 1: "mainly clear", 2: "partly cloudy", 3: "overcast clouds",
+    45: "fog", 48: "rime fog", 51: "light drizzle", 53: "drizzle", 55: "dense drizzle",
+    61: "light rain", 63: "rain", 65: "heavy rain", 66: "freezing rain", 67: "freezing rain",
+    71: "light snow", 73: "snow", 75: "heavy snow", 77: "snow grains",
+    80: "rain showers", 81: "rain showers", 82: "violent showers",
+    85: "snow showers", 86: "snow showers", 95: "thunderstorm",
+    96: "thunderstorm w/ hail", 99: "thunderstorm w/ hail",
+}
+
 
 @dataclass
 class ApprovalAction:
@@ -144,7 +160,9 @@ class _BridgeHandler(BaseHTTPRequestHandler):
                 self._send_json({"ok": False, "error": "forbidden"}, HTTPStatus.FORBIDDEN)
                 return
             command = str(body.get("command", ""))
-            ok = self.server.overlay.handle_web_command(command)
+            raw_args = body.get("args", {})
+            args = raw_args if isinstance(raw_args, dict) else {}
+            ok = self.server.overlay.handle_web_command(command, args)
             self._send_json({"ok": ok})
             return
         self._send_json({"ok": False, "error": "unknown endpoint"}, HTTPStatus.NOT_FOUND)
@@ -231,10 +249,15 @@ class WebJarvisOverlay:
         tracker: TokenTracker,
         gate: BudgetGate,
         on_close: Callable[[], None] | None = None,
+        on_command: Callable[[str, dict[str, Any]], bool] | None = None,
     ) -> None:
         self.tracker = tracker
         self.gate = gate
         self._on_close = on_close or (lambda: None)
+        # Dispatcher de comandos de UI que no resuelve el propio overlay
+        # (toggleMode, toggleCamera, sendText...). Lo provee jarvis.py y enruta
+        # a sus callbacks/sesion. Devuelve True si acepto el comando.
+        self._on_command = on_command or (lambda _cmd, _args: False)
         self._state = "idle"
         self._mode = "PTT"
         self._connection_status = "connecting"
@@ -265,6 +288,13 @@ class WebJarvisOverlay:
         self._log_path = Path(__file__).resolve().parent.parent / "data" / "jarvis.log"
         self._scheduler = UiScheduler(name="JarvisWebScheduler")
 
+        # Weather: ultimo payload cacheado + evento para forzar re-fetch (boton
+        # Refresh). Un hilo daemon lo refresca cada ~15 min sin bloquear el
+        # scheduler de UI (la llamada de red tiene timeout corto y fallback).
+        self._weather: dict[str, Any] = {}
+        self._weather_refresh = threading.Event()
+        self._weather_thread: threading.Thread | None = None
+
         # Watchdog supervisado (shell Tauri): si la ventana desaparece sin avisar
         # >grace, apagarse para no dejar un backend zombi con el microfono abierto.
         self._supervised = _env_truthy("JARVIS_SUPERVISED", False)
@@ -283,6 +313,11 @@ class WebJarvisOverlay:
 
         self.log_event("Web UI lista", "ok")
         self.after(REFRESH_MS, self._refresh_runtime_panels)
+        if _env_truthy("JARVIS_WEATHER", True):
+            self._weather_thread = threading.Thread(
+                target=self._weather_loop, name="jarvis-weather", daemon=True
+            )
+            self._weather_thread.start()
         if self._supervised:
             self.after(10_000, self._watchdog_check)
         if _env_truthy("JARVIS_WEB_UI_OPEN_BROWSER", True) and not self._supervised:
@@ -377,6 +412,8 @@ class WebJarvisOverlay:
             "cameraFrame": self._camera_frame_b64,
             "cameraFocus": self._camera_focus,
             "budget": self._budget_payload(),
+            "systemStats": self._system_stats(),
+            "weather": self._weather,
         }
 
     def emit(self, command: str, *args: Any) -> None:
@@ -616,7 +653,8 @@ class WebJarvisOverlay:
             self.emit("hideApproval", bool(approved))
         return True
 
-    def handle_web_command(self, command: str) -> bool:
+    def handle_web_command(self, command: str, args: dict[str, Any] | None = None) -> bool:
+        args = args or {}
         if command == "close":
             self.after(0, self.close)
             return True
@@ -626,7 +664,23 @@ class WebJarvisOverlay:
         if command == "openDashboard":
             self.after(0, self.open_dashboard)
             return True
-        return False
+        if command == "refreshStats":
+            stats = self._system_stats()
+            if stats:
+                self.emit("systemStats", stats)
+            return True
+        if command == "refreshWeather":
+            # Despierta al hilo de weather para re-fetch inmediato.
+            self._weather_refresh.set()
+            return True
+        # Comandos enrutados a jarvis.py (toggleMode, toggleCamera, sendText...).
+        # El dispatcher de jarvis se encarga de marshallar a su propio hilo de
+        # UI/sesion; aqui solo lo invocamos y devolvemos si lo reconocio.
+        try:
+            return bool(self._on_command(command, args))
+        except Exception as exc:  # pragma: no cover - defensivo
+            self.log_event(f"comando UI '{command}' fallo: {exc}", "error")
+            return False
 
     # ---- Camera preview (SSE headless) ----
 
@@ -682,6 +736,7 @@ class WebJarvisOverlay:
             return
         self._closed = True
         self._close_event.set()
+        self._weather_refresh.set()  # desbloquea el hilo de weather para que salga
         try:
             self._on_close()
         finally:
@@ -717,12 +772,86 @@ class WebJarvisOverlay:
         try:
             self.emit("updateBudget", self._budget_payload())
             self.emit("updateMemoryStats", self._memory_stats())
+            stats = self._system_stats()
+            if stats:
+                self.emit("systemStats", stats)
             self._notify_blocked_budgets()
         finally:
             try:
                 self.after(REFRESH_MS, self._refresh_runtime_panels)
             except Exception:
                 pass
+
+    def _system_stats(self) -> dict[str, Any]:
+        """CPU/RAM/Disk reales via psutil. Vacio si psutil no esta disponible."""
+        if psutil is None:
+            return {}
+        try:
+            cpu = psutil.cpu_percent(interval=None)
+            vm = psutil.virtual_memory()
+            disk = psutil.disk_usage(Path.home().anchor or os.sep)
+            return {
+                "cpu": round(cpu),
+                "ram": round(vm.percent),
+                "ramUsedGb": round(vm.used / 1e9, 1),
+                "ramTotalGb": round(vm.total / 1e9, 1),
+                "diskUsedGb": round(disk.used / 1e9),
+                "diskTotalGb": round(disk.total / 1e9),
+                "diskPct": round(disk.percent),
+            }
+        except Exception:
+            return {}
+
+    # ---- Weather (Open-Meteo + geolocalizacion por IP, sin API key) ----
+
+    def _weather_loop(self) -> None:
+        while not self._close_event.is_set():
+            payload = self._fetch_weather()
+            if payload:
+                self._weather = payload
+                self.emit("weather", payload)
+            # Espera ~15 min, o hasta que el boton Refresh dispare el evento.
+            self._weather_refresh.wait(timeout=900)
+            self._weather_refresh.clear()
+
+    def _fetch_weather(self) -> dict[str, Any] | None:
+        import urllib.request
+
+        def _get_json(url: str, timeout: float):
+            req = urllib.request.Request(url, headers={"User-Agent": "JARVIS/1.1"})
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                return json.loads(resp.read().decode("utf-8"))
+
+        try:
+            lat = os.environ.get("JARVIS_WEATHER_LAT")
+            lon = os.environ.get("JARVIS_WEATHER_LON")
+            place = os.environ.get("JARVIS_WEATHER_PLACE", "")
+            if not lat or not lon:
+                loc = _get_json("http://ip-api.com/json/?fields=lat,lon,city,country", 4.0)
+                lat, lon = loc.get("lat"), loc.get("lon")
+                if lat is None or lon is None:
+                    return None
+                place = ", ".join(p for p in (loc.get("city"), loc.get("country")) if p)
+            data = _get_json(
+                "https://api.open-meteo.com/v1/forecast"
+                f"?latitude={lat}&longitude={lon}"
+                "&current=temperature_2m,relative_humidity_2m,apparent_temperature,"
+                "wind_speed_10m,weather_code",
+                5.0,
+            )
+            cur = data.get("current", {})
+            code = int(cur.get("weather_code", 0) or 0)
+            return {
+                "tempC": round(float(cur.get("temperature_2m", 0)), 1),
+                "feelsC": round(float(cur.get("apparent_temperature", 0)), 1),
+                "humidity": round(float(cur.get("relative_humidity_2m", 0))),
+                "windMs": round(float(cur.get("wind_speed_10m", 0)) / 3.6, 1),
+                "place": place or "Unknown",
+                "desc": _WMO_DESC.get(code, "—"),
+                "code": code,
+            }
+        except Exception:
+            return None
 
     def _budget_payload(self) -> dict[str, Any]:
         report = self.gate.evaluate(self.tracker)

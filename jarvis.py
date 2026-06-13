@@ -517,6 +517,7 @@ class Jarvis:
             self.tracker,
             self.gate,
             on_close=lambda: self.stop(close_overlay=False),
+            on_command=self._on_ui_command,
         )
         # Arranca el pump de UI en el main thread: drena _ui_thread y se re-arma.
         # El primer after() se registra aquí (build corre en el main thread), así
@@ -817,6 +818,42 @@ class Jarvis:
         frame = SimpleNamespace(jpeg_bytes=jpeg_bytes)
         self.overlay.set_camera_active(True)
         self.overlay.update_camera_preview(frame)
+
+    # ---- Comandos de la UI web (botones del overlay premium) ----
+
+    def _on_ui_command(self, command: str, args: dict) -> bool:
+        """Enruta comandos de los botones de la UI web a la logica de Jarvis.
+
+        Lo invoca WebJarvisOverlay desde el thread del servidor HTTP. Los metodos
+        destino ya marshallan a la sesion/UI (igual que las hotkeys, que corren
+        en el thread del teclado), asi que es seguro llamarlos directo. Devuelve
+        True si el comando se reconoce.
+        """
+        if command == "toggleMode":
+            self._on_toggle_mode()
+            return True
+        if command == "setMode":
+            self._apply_listen_mode(str(args.get("mode", "")))
+            return True
+        if command == "toggleCamera":
+            self._on_capture_camera()
+            return True
+        if command == "sendText":
+            text = str(args.get("text", "")).strip()
+            if text:
+                self._send_user_text(text)
+            return True
+        return False
+
+    def _send_user_text(self, text: str) -> None:
+        """Inyecta un turno de usuario escrito en la sesion Gemini (chat box)."""
+        if not self._gemini_budget_available("[TEXT] send"):
+            return
+        self._log(f"[TEXT] usuario -> {text[:80]}")
+        self._tk(lambda: self.overlay.append_input(text + "\n"))
+        self._set_overlay_state("thinking")
+        self.latency.mark_user_end()
+        self.session.send_text(text)
 
     def _on_capture_region(self) -> None:
         """Hotkey Ctrl+Alt+S. Llamado desde keyboard thread.

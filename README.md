@@ -4,7 +4,7 @@ Asistente estilo Gemini Live con voz bidireccional, visión de pantalla, compute
 
 > **Status:** Copiloto local funcional. Voz bidireccional, overlay, hotkeys, memoria RAG, Claude tool, vision/screen capture, action executor seguro, modos, telemetry y budgets ya existen.
 
-> **Version actual:** v1.10 — UI Tauri + React (produccion)
+> **Version actual:** v1.03 — UI Tauri + React 100% funcional + nucleo de energia
 
 ---
 
