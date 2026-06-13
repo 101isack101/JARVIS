@@ -22,6 +22,7 @@ import threading
 import uuid
 from datetime import datetime
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 from dotenv import load_dotenv
@@ -73,6 +74,7 @@ from security.approvals import ApprovalBroker
 from security.kill_switch import hard_exit
 from skills.registry import active_skill_prompt_block
 from telemetry.budgets import BudgetGate
+from telemetry.error_journal import record_error
 from telemetry.latency import LatencyTracker
 from telemetry.logger import configure_logger, get_logger
 from telemetry.persistence import UsagePersistence
@@ -121,6 +123,12 @@ def _install_crash_capture() -> None:
         _tb.print_exception(exc_type, exc_value, exc_tb, file=crash_fh)
         crash_fh.flush()
         try:
+            record_error(
+                "jarvis.crash_capture",
+                exc=exc_value,
+                severity="critical",
+                context={"header": header},
+            )
             log.error(f"[CRASH] {header}: {exc_type.__name__}: {exc_value}")
         except Exception:
             pass
@@ -238,6 +246,7 @@ TOOL_HINTS: dict[str, str] = {
     "jarvis_browse": "Listando notas...",
     "jarvis_remember": "Guardando en tu vault...",
     "obsidian_mcp": "Operando en Obsidian...",
+    "jarvis_open_obsidian": "Abriendo Obsidian...",
     "ask_gpt55_code": "Consultando GPT 5.5...",
     "jarvis_run_safe_command": "Ejecutando comando...",
     "spotify_control": "Controlando Spotify...",
@@ -793,6 +802,7 @@ class Jarvis:
             frame = self.camera.capture()
             self._log(f"[CAMERA] capturada {frame.width}x{frame.height}: {frame.path.name}")
             self._tk(lambda: self.overlay.log_event("Camara capturada", "ok"))
+            self._tk(lambda data=frame.jpeg_bytes: self._show_camera_frame(data))
             self._set_overlay_state("thinking")
             self.session.send_image(
                 frame.jpeg_bytes,
@@ -802,6 +812,11 @@ class Jarvis:
         except Exception as exc:
             self._log(f"[CAMERA] error: {type(exc).__name__}: {exc}")
             self._set_overlay_state("idle" if self.mode == "PTT" else "listening")
+
+    def _show_camera_frame(self, jpeg_bytes: bytes) -> None:
+        frame = SimpleNamespace(jpeg_bytes=jpeg_bytes)
+        self.overlay.set_camera_active(True)
+        self.overlay.update_camera_preview(frame)
 
     def _on_capture_region(self) -> None:
         """Hotkey Ctrl+Alt+S. Llamado desde keyboard thread.
@@ -1068,9 +1083,19 @@ class Jarvis:
         confirmacion explicita porque la respuesta de Jarvis llegara enseguida."""
         self.latency.record_tool(name, elapsed_ms)
         self._tk(lambda: self.overlay.record_tool_end(name, elapsed_ms, ok, response))
+        self._preview_camera_tool_result(name, response)
         if not ok:
             self._log(f"[TOOL] {name} fallo o timeout tras {elapsed_ms:.0f}ms")
             self._tk(lambda: self.overlay.log_event(f"Tool fallo: {name}", "error"))
+
+    def _preview_camera_tool_result(self, name: str, response=None) -> None:
+        if name != "camera_look" or not isinstance(response, dict):
+            return
+        attach = response.get("__attach_image") or {}
+        jpeg_bytes = attach.get("png_bytes")
+        if not isinstance(jpeg_bytes, (bytes, bytearray)) or not jpeg_bytes:
+            return
+        self._tk(lambda data=bytes(jpeg_bytes): self._show_camera_frame(data))
 
     def _on_turn_complete(self) -> None:
         # Cierra metricas del turno y loguea una linea condensada con TTFB.
@@ -1153,6 +1178,7 @@ class Jarvis:
         self._set_overlay_state("listening")
 
     def _on_error(self, exc: BaseException) -> None:
+        record_error("jarvis.session", exc=exc, context={"handler": "_on_error"})
         self._log(f"[ERROR] {type(exc).__name__}: {exc}")
         self._set_overlay_state("idle" if self.mode == "PTT" else "listening")
 
@@ -1167,7 +1193,15 @@ class Jarvis:
     def _log(self, msg: str) -> None:
         # Heuristica para distribuir niveles sin reescribir 100 call-sites:
         # mensajes con [ERROR]/[WARN] van a sus niveles, el resto a INFO.
-        if "[ERROR]" in msg:
+        lower = msg.lower()
+        is_error = (
+            "[ERROR]" in msg
+            or " error:" in lower
+            or " fallo" in lower
+            or " falló" in lower
+        )
+        if is_error:
+            record_error("jarvis.log", message=msg)
             log.error(msg)
         elif "[WARN]" in msg or "[WATCHDOG]" in msg:
             log.warning(msg)

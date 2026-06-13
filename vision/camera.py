@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import io
 import os
+import subprocess
+import sys
 import threading
 import time
 from dataclasses import dataclass
@@ -26,11 +28,95 @@ except Exception:  # pragma: no cover
     cv2 = None  # type: ignore
 
 
+class _ClosedCapture:
+    def isOpened(self) -> bool:
+        return False
+
+    def read(self):
+        return False, None
+
+    def release(self) -> None:
+        return None
+
+
+class _CaptureHandle:
+    def __init__(self, dev: Any, attempts: list[dict[str, Any]]) -> None:
+        self._dev = dev
+        self.jarvis_attempts = attempts
+
+    def isOpened(self):
+        return self._dev.isOpened()
+
+    def read(self):
+        return self._dev.read()
+
+    def release(self):
+        return self._dev.release()
+
+    def __getattr__(self, name: str):
+        return getattr(self._dev, name)
+
+
+def _backend_candidates() -> list[tuple[str, int | None]]:
+    if cv2 is None:  # pragma: no cover
+        return []
+    all_backends = {
+        "dshow": ("DSHOW", getattr(cv2, "CAP_DSHOW", 700)),
+        "msmf": ("MSMF", getattr(cv2, "CAP_MSMF", 1400)),
+        "any": ("ANY", None),
+    }
+    requested = os.environ.get("JARVIS_CAMERA_BACKEND", "auto").strip().lower()
+    if requested and requested != "auto":
+        names = [part.strip() for part in requested.replace(";", ",").split(",") if part.strip()]
+    else:
+        names = ["dshow", "msmf", "any"] if sys.platform == "win32" else ["any"]
+    return [all_backends[name] for name in names if name in all_backends]
+
+
+def _open_cv_capture(index: int, backend: int | None) -> Any:
+    if backend is None:
+        return cv2.VideoCapture(index)
+    return cv2.VideoCapture(index, backend)
+
+
 def _default_device_factory(index: int) -> Any:
     if cv2 is None:  # pragma: no cover
         raise RuntimeError("opencv-python (cv2) no esta instalado")
-    # CAP_DSHOW = backend DirectShow, el correcto en Windows.
-    return cv2.VideoCapture(index, cv2.CAP_DSHOW)
+    attempts: list[dict[str, Any]] = []
+    for backend_name, backend in _backend_candidates():
+        dev = _open_cv_capture(index, backend)
+        opened = bool(dev.isOpened())
+        attempts.append({"index": index, "backend": backend_name, "opened": opened})
+        if opened:
+            return _CaptureHandle(dev, attempts)
+        try:
+            dev.release()
+        except Exception:
+            pass
+    return _CaptureHandle(_ClosedCapture(), attempts)
+
+
+def _windows_camera_summary() -> str:
+    if sys.platform != "win32":
+        return ""
+    script = (
+        "Get-PnpDevice -Class Camera,Image -ErrorAction SilentlyContinue | "
+        "Select-Object Status,Problem,Present,Class,FriendlyName,InstanceId | ConvertTo-Json -Compress"
+    )
+    try:
+        proc = subprocess.run(
+            ["powershell", "-NoProfile", "-Command", script],
+            capture_output=True,
+            text=True,
+            timeout=3,
+            check=False,
+        )
+    except Exception as exc:
+        return f"PnP no disponible ({type(exc).__name__}: {exc})"
+    out = (proc.stdout or "").strip()
+    if not out:
+        return "Windows no reporta dispositivos Camera/Image."
+    return out[:1000]
 
 
 @dataclass
@@ -64,7 +150,10 @@ class CameraCapture:
     ) -> None:
         self.out_dir = Path(out_dir)
         self.out_dir.mkdir(parents=True, exist_ok=True)
-        self.index = int(os.environ.get("JARVIS_CAMERA_INDEX", "0")) if index is None else int(index)
+        raw_index = os.environ.get("JARVIS_CAMERA_INDEX", "auto") if index is None else str(index)
+        self._auto_index = raw_index.strip().lower() == "auto"
+        self.index = 0 if self._auto_index else int(raw_index)
+        self.scan_max = max(1, int(os.environ.get("JARVIS_CAMERA_SCAN_MAX", "6")))
         self.max_side = int(os.environ.get("JARVIS_CAMERA_MAX_SIDE", str(max_side)))
         if retention_hours is None:
             retention_hours = float(os.environ.get("JARVIS_CAMERA_RETENTION_HOURS", "24"))
@@ -85,13 +174,8 @@ class CameraCapture:
 
     def capture(self) -> CameraFrame:
         with self._lock:
-            dev = self._device_factory(self.index)
+            dev = self._open_device("foto")
             try:
-                if not dev.isOpened():
-                    raise RuntimeError(
-                        "No pude abrir la camara. Verifica que no este en uso por "
-                        "otra app y revisa Configuracion -> Privacidad -> Camara."
-                    )
                 self._warmup(dev)
                 ok, frame_bgr = dev.read()
                 if not ok or frame_bgr is None:
@@ -112,13 +196,7 @@ class CameraCapture:
         with self._lock:
             if self._device is not None:
                 return
-            dev = self._device_factory(self.index)
-            if not dev.isOpened():
-                try:
-                    dev.release()
-                except Exception:
-                    pass
-                raise RuntimeError("No pude abrir la camara para modo vision.")
+            dev = self._open_device("modo vision")
             self._warmup(dev)
             self._device = dev
 
@@ -141,6 +219,41 @@ class CameraCapture:
                 self._device = None
 
     # ---- internals ----
+
+    def _candidate_indices(self) -> list[int]:
+        if not self._auto_index:
+            return [self.index]
+        return list(range(self.scan_max))
+
+    def _open_device(self, purpose: str) -> Any:
+        attempts: list[dict[str, Any]] = []
+        for index in self._candidate_indices():
+            dev = self._device_factory(index)
+            attempts.extend(getattr(dev, "jarvis_attempts", [{"index": index, "opened": bool(dev.isOpened())}]))
+            if dev.isOpened():
+                self.index = index
+                return dev
+            try:
+                dev.release()
+            except Exception:
+                pass
+        raise RuntimeError(self._open_error_message(purpose, attempts))
+
+    def _open_error_message(self, purpose: str, attempts: list[dict[str, Any]]) -> str:
+        tried = ", ".join(
+            f"idx={a.get('index')} backend={a.get('backend', '?')} opened={a.get('opened')}"
+            for a in attempts
+        ) or "sin intentos"
+        device_summary = _windows_camera_summary()
+        parts = [
+            f"No pude abrir la camara para {purpose}.",
+            f"Intentos OpenCV: {tried}.",
+            "Revisa que la camara no este en uso por otra app, que Windows permita apps de escritorio y que el driver este OK.",
+            "Puedes probar JARVIS_CAMERA_INDEX=auto o un indice concreto (0, 1, 2) y JARVIS_CAMERA_BACKEND=msmf,dshow,any.",
+        ]
+        if device_summary:
+            parts.append(f"Dispositivos Windows: {device_summary}")
+        return " ".join(parts)
 
     def _warmup(self, dev: Any) -> None:
         for _ in range(self.warmup_frames):
