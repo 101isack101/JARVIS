@@ -817,10 +817,19 @@ class Jarvis:
         self._tk(self._show_region_selector)
 
     def _show_region_selector(self) -> None:
-        """Crea y muestra el RegionSelector. DEBE correr en main thread."""
+        """Crea y muestra el RegionSelector. DEBE correr en main thread.
+
+        En modo web (overlay sin root tk), degrada a captura completa.
+        """
+        root = getattr(self.overlay, "root", None)
+        if root is None:
+            self._log("[REGION] modo web: RegionSelector no disponible, usando captura completa")
+            self.overlay.log_event("Ctrl+Alt+S: seleccion de region no disponible en modo web", "warn")
+            self._on_capture_screen()
+            return
         try:
             RegionSelector(
-                self.overlay.root,
+                root,
                 on_select=self._on_region_selected,
             ).show()
         except Exception as exc:
