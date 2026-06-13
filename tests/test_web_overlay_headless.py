@@ -44,6 +44,7 @@ def _make_overlay():
 
     import os
     os.environ.setdefault("JARVIS_WEB_UI_OPEN_BROWSER", "0")
+    os.environ.setdefault("JARVIS_WEB_UI_PORT", "0")
 
     from overlay.web_overlay import WebJarvisOverlay
 
@@ -160,6 +161,26 @@ def test_camera_methods_no_tk():
         overlay.camera_look()
         overlay.camera_watch_start()
         overlay.camera_watch_stop()
+    finally:
+        overlay.close()
+
+
+def test_camera_preview_throttle_is_independent_from_audio():
+    """Un frame de camara no debe bloquearse por un audio level recien emitido."""
+    overlay = _make_overlay()
+    try:
+        client = overlay.register_client()
+        overlay.feed_voice_audio((1000).to_bytes(2, "little", signed=True) * 256)
+        overlay.update_camera_preview(MagicMock(jpeg_bytes=b"jpeg"))
+
+        commands = []
+        deadline = time.monotonic() + 1.0
+        while time.monotonic() < deadline and "cameraFrame" not in commands:
+            payload = json.loads(client.get(timeout=0.2))
+            commands.append(payload["command"])
+
+        assert "feedAudioLevel" in commands
+        assert "cameraFrame" in commands
     finally:
         overlay.close()
 

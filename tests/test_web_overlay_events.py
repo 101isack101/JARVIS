@@ -22,15 +22,23 @@ def overlay(monkeypatch):
 def test_record_tool_start_and_end_tracks_any_tool(overlay):
     overlay.record_tool_start("ask_claude_deep", {"prompt": "hola"})
     events = overlay.agent_events
+    started = events[-1]
     assert events[-1]["name"] == "ask_claude_deep"
     assert events[-1]["status"] == "running"
     assert "hola" in events[-1]["summary"]
+    assert started["id"]
+    assert isinstance(started["startedAt"], int)
+    assert started["endedAt"] is None
 
     overlay.record_tool_end("ask_claude_deep", 1234.5, True, {"ok": True})
     events = overlay.agent_events
     assert events[-1]["name"] == "ask_claude_deep"
     assert events[-1]["status"] == "ok"
     assert events[-1]["elapsedMs"] == pytest.approx(1234.5)
+    assert events[-1]["id"] == started["id"]
+    assert events[-1]["startedAt"] == started["startedAt"]
+    assert isinstance(events[-1]["endedAt"], int)
+    assert events[-1]["endedAt"] >= started["startedAt"]
 
 
 def test_record_tool_delegates_to_memory_panel_for_memory_tools(overlay):
@@ -64,3 +72,21 @@ def test_snapshot_includes_agent_events(overlay):
     snap = overlay.snapshot()
     assert any(e["name"] == "spotify_play" for e in snap["agentEvents"])
 
+
+def test_camera_frame_is_kept_in_snapshot_and_cleared_on_stop(overlay):
+    from types import SimpleNamespace
+
+    overlay.update_camera_preview(SimpleNamespace(jpeg_bytes=b"jpeg"))
+
+    snap = overlay.snapshot()
+    assert snap["cameraActive"] is True
+    assert snap["cameraFrame"] == "anBlZw=="
+
+    overlay.set_camera_focus([1, 2, 3, 4], "obj")
+    assert overlay.snapshot()["cameraFocus"]["label"] == "obj"
+
+    overlay.set_camera_active(False)
+    snap = overlay.snapshot()
+    assert snap["cameraActive"] is False
+    assert snap["cameraFrame"] is None
+    assert snap["cameraFocus"] is None

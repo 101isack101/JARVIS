@@ -37,16 +37,20 @@ export interface MemoryStats {
 
 export interface AgentToolEvent {
   id: string
+  stamp: string
   name: string
-  args: Record<string, unknown>
-  startedAt: number
-  endedAt?: number
-  status: 'running' | 'done' | 'error'
+  summary: string
+  detail: string
+  elapsedMs: number | null
+  startedAt?: number
+  endedAt?: number | null
+  status: 'running' | 'ok' | 'error'
 }
 
 export interface AudioTelemetry {
-  erlePeakDb: number
-  wakewordPeak: number
+  erlePeakDb?: number
+  wakewordPeak?: number
+  stamp?: string
 }
 
 export interface ApprovalPayload {
@@ -69,4 +73,10 @@ export interface JarvisSnapshot {
   events: LogEvent[]
   memory: MemoryStats
   budget: BudgetPayload
+  agentEvents: AgentToolEvent[]
+  audioTelemetry: AudioTelemetry | null
+  latency: string[]
+  cameraActive?: boolean
+  cameraFrame?: string | null
+  cameraFocus?: { box: unknown; label: string } | null
 }

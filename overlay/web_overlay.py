@@ -17,7 +17,7 @@ import struct
 import threading
 import time
 import webbrowser
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -49,7 +49,6 @@ class ApprovalAction:
 
 _WEB_DIST = Path(__file__).resolve().parent / "web_dist"
 _WEB_FALLBACK = Path(__file__).resolve().parent / "web_ui"
-WEB_DIR = _WEB_DIST if _WEB_DIST.is_dir() else _WEB_FALLBACK
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8765
 REFRESH_MS = 500
@@ -77,6 +76,15 @@ def _audio_emit_interval_from_env() -> float:
     except ValueError:
         fps = DEFAULT_AUDIO_VISUAL_FPS
     return 1.0 / max(1, fps)
+
+
+def resolve_web_dir() -> Path:
+    override = os.environ.get("JARVIS_WEB_UI_DIR", "").strip()
+    if override:
+        return Path(override)
+    if (_WEB_DIST / "index.html").is_file():
+        return _WEB_DIST
+    return _WEB_FALLBACK
 
 
 def _provider_payload(pb: ProviderBudget, tokens: int) -> dict[str, Any]:
@@ -167,9 +175,10 @@ class _BridgeHandler(BaseHTTPRequestHandler):
 
     def _serve_static(self, path: str) -> None:
         rel = "index.html" if path in {"", "/"} else unquote(path.lstrip("/"))
-        target = (WEB_DIR / rel).resolve()
+        web_dir = resolve_web_dir()
+        target = (web_dir / rel).resolve()
         try:
-            target.relative_to(WEB_DIR.resolve())
+            target.relative_to(web_dir.resolve())
         except ValueError:
             self.send_error(HTTPStatus.FORBIDDEN)
             return
@@ -238,6 +247,9 @@ class WebJarvisOverlay:
         self._agent_events: list[dict[str, Any]] = []
         self._audio_telemetry: dict[str, Any] = {}
         self._latency_lines: list[str] = []
+        self._camera_active = False
+        self._camera_frame_b64: str | None = None
+        self._camera_focus: dict[str, Any] | None = None
         self._memory_active: dict[str, dict[str, Any]] = {}
         self._pending_approvals: dict[str, Callable[[str, bool], None]] = {}
         self.ui_token = secrets.token_urlsafe(32)
@@ -245,6 +257,8 @@ class WebJarvisOverlay:
         self._clients: set[queue.Queue[str]] = set()
         self._clients_lock = threading.Lock()
         self._last_audio_emit_ts = 0.0
+        self._last_camera_emit_ts = 0.0
+        self._tool_event_seq = 0
         self._audio_emit_interval_s = _audio_emit_interval_from_env()
         self._closed = False
         self._close_event = threading.Event()
@@ -359,6 +373,9 @@ class WebJarvisOverlay:
             "agentEvents": self._agent_events[-30:],
             "audioTelemetry": self._audio_telemetry,
             "latency": self._latency_lines,
+            "cameraActive": self._camera_active,
+            "cameraFrame": self._camera_frame_b64,
+            "cameraFocus": self._camera_focus,
             "budget": self._budget_payload(),
         }
 
@@ -449,13 +466,18 @@ class WebJarvisOverlay:
         Las tools de memoria tambien alimentan el panel historico existente.
         """
         args = args or {}
+        self._tool_event_seq += 1
+        now_ms = int(time.time() * 1000)
         entry = {
+            "id": f"tool-{self._tool_event_seq}",
             "stamp": time.strftime("%H:%M:%S"),
             "name": name,
             "summary": self._tool_args_summary(name, args),
             "status": "running",
             "detail": "En progreso",
             "elapsedMs": None,
+            "startedAt": now_ms,
+            "endedAt": None,
         }
         self._agent_events.append(entry)
         self._agent_events = self._agent_events[-150:]
@@ -470,21 +492,29 @@ class WebJarvisOverlay:
         response: Any = None,
     ) -> None:
         status = "ok" if ok and not self._response_failed(response) else "error"
+        now_ms = int(time.time() * 1000)
         entry = {
+            "id": "",
             "stamp": time.strftime("%H:%M:%S"),
             "name": name,
             "summary": "",
             "status": status,
             "detail": self._memory_response_summary(name, response),
             "elapsedMs": elapsed_ms,
+            "startedAt": now_ms,
+            "endedAt": now_ms,
         }
         for idx in range(len(self._agent_events) - 1, -1, -1):
             existing = self._agent_events[idx]
             if existing.get("name") == name and existing.get("status") == "running":
+                entry["id"] = str(existing.get("id", ""))
                 entry["summary"] = str(existing.get("summary", ""))
+                entry["startedAt"] = existing.get("startedAt", now_ms)
                 self._agent_events[idx] = entry
                 break
         else:
+            self._tool_event_seq += 1
+            entry["id"] = f"tool-{self._tool_event_seq}"
             self._agent_events.append(entry)
         self._agent_events = self._agent_events[-150:]
         self.emit("agentToolEnd", entry)
@@ -602,23 +632,31 @@ class WebJarvisOverlay:
 
     def set_camera_active(self, active: bool) -> None:
         """Indica al frontend si la camara esta ON/OFF via SSE."""
+        self._camera_active = bool(active)
+        if not self._camera_active:
+            self._camera_frame_b64 = None
+            self._camera_focus = None
         level = "warn" if active else "ok"
         msg = "CAMARA ACTIVA (modo vision)" if active else "Camara apagada"
         self.log_event(msg, level)
-        self.emit("setCameraActive", active)
+        self.emit("setCameraActive", self._camera_active)
 
     def update_camera_preview(self, frame) -> None:
         """Envia frame JPEG como base64 por SSE (throttle 4fps)."""
         now = time.monotonic()
-        if now - self._last_audio_emit_ts < 0.25:  # 4fps max
+        if now - self._last_camera_emit_ts < 0.25:  # 4fps max
             return
-        self._last_audio_emit_ts = now
-        jpeg_b64 = base64.b64encode(frame.jpeg_bytes).decode("ascii")
-        self.emit("cameraFrame", jpeg_b64)
+        self._last_camera_emit_ts = now
+        self._camera_frame_b64 = base64.b64encode(frame.jpeg_bytes).decode("ascii")
+        if not self._camera_active:
+            self._camera_active = True
+            self.emit("setCameraActive", True)
+        self.emit("cameraFrame", self._camera_frame_b64)
 
     def set_camera_focus(self, box_px: Any, label: str = "") -> None:
         """Envia bounding box de foco al frontend por SSE."""
-        self.emit("cameraFocus", {"box": box_px, "label": label})
+        self._camera_focus = {"box": box_px, "label": label}
+        self.emit("cameraFocus", self._camera_focus)
 
     def camera_look(self) -> None:
         """Indica al frontend que se esta realizando una captura de camara."""

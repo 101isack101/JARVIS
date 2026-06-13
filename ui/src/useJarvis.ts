@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, useCallback } from 'react'
+import type { Dispatch, SetStateAction } from 'react'
 import type {
   JarvisState, JarvisMode, ConnectionStatus, LogEvent,
   BudgetPayload, MemoryStats, AgentToolEvent, AudioTelemetry,
@@ -47,9 +48,25 @@ const INITIAL: JarvisUIState = {
   cameraFocus: null,
 }
 
-type Dispatch = React.Dispatch<React.SetStateAction<JarvisUIState>>
+type UiDispatch = Dispatch<SetStateAction<JarvisUIState>>
 
-function applyCommand(set: Dispatch, command: string, args: unknown[]) {
+function currentStamp() {
+  return new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+}
+
+function logEventFromArgs(args: unknown[]): LogEvent {
+  const first = args[0]
+  if (first && typeof first === 'object' && 'message' in first) {
+    return first as LogEvent
+  }
+  return {
+    stamp: currentStamp(),
+    message: String(first ?? ''),
+    level: (args[1] as LogEvent['level']) ?? 'info',
+  }
+}
+
+function applyCommand(set: UiDispatch, command: string, args: unknown[]) {
   set(prev => {
     switch (command) {
       case 'snapshot': {
@@ -67,6 +84,12 @@ function applyCommand(set: Dispatch, command: string, args: unknown[]) {
           events: snap.events,
           memory: snap.memory,
           budget: snap.budget,
+          agentTools: snap.agentEvents ?? [],
+          audioTelemetry: snap.audioTelemetry ?? null,
+          latencyLines: snap.latency ?? [],
+          cameraActive: Boolean(snap.cameraActive),
+          cameraFrame: snap.cameraFrame ?? null,
+          cameraFocus: snap.cameraFocus ?? null,
         }
       }
       case 'setState':     return { ...prev, state: args[0] as JarvisState }
@@ -80,7 +103,7 @@ function applyCommand(set: Dispatch, command: string, args: unknown[]) {
       case 'appendOutput': return { ...prev, outputTranscript: prev.outputTranscript + (args[0] as string) }
       case 'clearTranscripts': return { ...prev, inputTranscript: '', outputTranscript: '' }
       case 'logEvent': {
-        const ev: LogEvent = { stamp: args[0] as string, level: args[1] as LogEvent['level'], message: args[2] as string }
+        const ev = logEventFromArgs(args)
         return { ...prev, events: [...prev.events.slice(-49), ev] }
       }
       case 'updateBudget':      return { ...prev, budget: args[0] as BudgetPayload }
@@ -92,10 +115,18 @@ function applyCommand(set: Dispatch, command: string, args: unknown[]) {
         return { ...prev, agentTools: [...prev.agentTools.slice(-29), { ...ev, status: 'running' }] }
       }
       case 'agentToolEnd': {
-        const { id, status } = args[0] as { id: string; status: 'done' | 'error'; endedAt: number }
+        const ev = args[0] as AgentToolEvent
+        let matched = false
+        const updated = prev.agentTools.map(t => {
+          if (t.id === ev.id) {
+            matched = true
+            return { ...t, ...ev }
+          }
+          return t
+        })
         return {
           ...prev,
-          agentTools: prev.agentTools.map(t => t.id === id ? { ...t, ...args[0] as object, status } : t),
+          agentTools: matched ? updated : [...prev.agentTools.slice(-29), ev],
         }
       }
       case 'audioTelemetry': return { ...prev, audioTelemetry: args[0] as AudioTelemetry }
@@ -103,8 +134,16 @@ function applyCommand(set: Dispatch, command: string, args: unknown[]) {
         const line = args[0] as string
         return { ...prev, latencyLines: [...prev.latencyLines.slice(-19), line] }
       }
-      case 'setCameraActive': return { ...prev, cameraActive: args[0] as boolean }
-      case 'cameraFrame':     return { ...prev, cameraFrame: args[0] as string }
+      case 'setCameraActive': {
+        const active = args[0] as boolean
+        return {
+          ...prev,
+          cameraActive: active,
+          cameraFrame: active ? prev.cameraFrame : null,
+          cameraFocus: active ? prev.cameraFocus : null,
+        }
+      }
+      case 'cameraFrame':     return { ...prev, cameraActive: true, cameraFrame: args[0] as string }
       case 'cameraFocus':     return { ...prev, cameraFocus: args[0] as { box: unknown; label: string } }
       default: return prev
     }
@@ -115,6 +154,7 @@ export function useJarvis() {
   const [ui, setUi] = useState<JarvisUIState>(INITIAL)
   const retryRef = useRef(0)
   const esRef = useRef<EventSource | null>(null)
+  const connectRef = useRef<(() => void) | null>(null)
 
   const connect = useCallback(() => {
     esRef.current?.close()
@@ -138,13 +178,17 @@ export function useJarvis() {
       setUi(prev => ({ ...prev, connectionStatus: 'disconnected' }))
       const delay = Math.min(500 * 2 ** retryRef.current, 15000)
       retryRef.current++
-      setTimeout(connect, delay)
+      setTimeout(() => connectRef.current?.(), delay)
     }
   }, [])
 
   useEffect(() => {
+    connectRef.current = connect
     connect()
-    return () => esRef.current?.close()
+    return () => {
+      connectRef.current = null
+      esRef.current?.close()
+    }
   }, [connect])
 
   const sendCommand = useCallback(async (command: string, token: string) => {

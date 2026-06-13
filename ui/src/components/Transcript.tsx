@@ -1,4 +1,5 @@
 import { useEffect, useRef } from 'react'
+import type { ReactNode } from 'react'
 import { motion } from 'framer-motion'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
@@ -8,6 +9,17 @@ import { oneDark } from 'react-syntax-highlighter/dist/esm/styles/prism'
 interface Props {
   inputTranscript: string
   outputTranscript: string
+}
+
+interface MarkdownCodeProps {
+  children?: ReactNode
+  className?: string
+  node?: {
+    position?: {
+      start?: { line?: number }
+      end?: { line?: number }
+    }
+  }
 }
 
 export default function Transcript({ inputTranscript, outputTranscript }: Props) {
@@ -46,8 +58,7 @@ export default function Transcript({ inputTranscript, outputTranscript }: Props)
             <ReactMarkdown
               remarkPlugins={[remarkGfm]}
               components={{
-                code(props: any) {
-                  const { children, className, node, ...rest } = props
+                code({ children, className, node }: MarkdownCodeProps) {
                   const match = /language-(\w+)/.exec(className || '')
                   const isBlock = node?.position?.start?.line !== node?.position?.end?.line
                   return isBlock && match ? (
@@ -56,12 +67,11 @@ export default function Transcript({ inputTranscript, outputTranscript }: Props)
                       language={match[1]}
                       PreTag="div"
                       customStyle={{ margin: 0, background: 'transparent', fontSize: '0.8rem' }}
-                      {...rest}
                     >
                       {String(children).replace(/\n$/, '')}
                     </SyntaxHighlighter>
                   ) : (
-                    <code className={className} {...rest}>{children}</code>
+                    <code className={className}>{children}</code>
                   )
                 },
               }}
