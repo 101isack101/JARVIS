@@ -17,7 +17,6 @@ from .config import KnowledgeImproverConfig
 from .detectors import detect_contradictions, detect_duplicate_clusters
 from .events import MemoryEvent
 from .judge import judge_merge
-from .projection import rebuild_card_body, snapshot_previous
 from .proposer import to_signals
 
 EventLoader = Callable[[object], list[MemoryEvent]]
@@ -79,7 +78,7 @@ class KnowledgeImprover:
             except Exception:
                 pass
 
-        memory_path = Path(getattr(vault, "memory_path"))
+        memory_path = Path(vault.memory_path)
         actions = [
             f"eventos={len(events)}",
             f"clusters={len(clusters)}",

@@ -53,3 +53,15 @@ def test_run_writes_health_and_log(tmp_path):
     imp.run(_FakeVault(tmp_path))
     assert (tmp_path / "self-improvement" / "health.md").exists()
     assert (tmp_path / "self-improvement" / "review-log.md").exists()
+
+
+def test_run_is_fail_safe_when_embed_raises(tmp_path):
+    def boom_embed(texts):
+        raise RuntimeError("embed exploded")
+    imp = KnowledgeImprover(
+        config=KnowledgeImproverConfig(),
+        embed_fn=boom_embed,
+        event_loader=lambda _v: [_ev("hello")],
+        reasoner=None,
+    )
+    imp.run(_FakeVault(tmp_path))  # must NOT raise
