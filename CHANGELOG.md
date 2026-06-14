@@ -4,6 +4,13 @@ Todas las versiones relevantes de JARVIS se documentan aqui.
 
 ## Unreleased
 
+### Added
+
+- Auto-mejora recursiva de conocimiento (Fase 1): al cerrar sesión, JARVIS consolida
+  sus Project Memory Cards de forma aditiva (recalcula confianza con decaimiento/refuerzo,
+  detecta duplicados por coseno) y propone fusiones/contradicciones vía el morning
+  briefing (HITL). Modelo evento→proyección regenerable; fail-safe total; métricas de
+  salud en `Jarvis Memory/self-improvement/`. Paquete `memory/self_improvement/`.
 - Briefing matutino hablado: al arrancar, JARVIS narra en voz un resumen con
   pendientes del vault, estado de los repos git y titulares de IA del día
   (reutiliza las notas del AI News Agent). Idempotente por proceso (no se repite
@@ -13,6 +20,12 @@ Todas las versiones relevantes de JARVIS se documentan aqui.
   codigo, debugging, arquitectura de software y modo agentico a GPT 5.5.
 - `JARVIS_AGENTIC_CODE_MODEL` y `JARVIS_OPENAI_TIMEOUT_S` documentados; la ruta
   requiere `OPENAI_API_KEY` y degrada con error claro si falta.
+- Delegaciones GPT/Claude ajustadas sin recortar calidad: timeouts configurables
+  por `.env`, routing mas estricto para evitar escalados innecesarios y prewarm
+  local de clientes para quitar latencia de primera llamada.
+- Modo informe largo para GPT/Claude: si Gemini pide muchos tokens porque Isaac
+  solicito un informe/documento/analisis amplio, JARVIS usa timeouts extendidos
+  configurables sin hacer lenta la conversacion normal.
 - Skills runtime con `jarvis_skill(list|get|activate|deactivate|status|reload)`,
   catálogo builtin y carga de skills JSON locales desde `skills/local/`.
 - Importacion automatica de skills documentadas tipo Codex desde

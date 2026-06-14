@@ -62,6 +62,8 @@ from memory.session_summary import (
 from memory.tools import ToolContext, ToolDispatcher, make_tool_object
 from overlay.ui_thread import UiThread
 from openai_code.reasoner import GPT55CodeReasoner
+from memory.self_improvement import KnowledgeImprover
+from memory.self_improvement.config import KnowledgeImproverConfig
 from proactivity.config import ProactivityConfig
 from proactivity.engine import ProactivityEngine
 from proactivity.morning_brief import (
@@ -257,16 +259,31 @@ TOOL_HINTS: dict[str, str] = {
     "spotify_control": "Controlando Spotify...",
 }
 
-# Per-tool timeouts. ask_claude_deep tipicamente tarda 8-15s en prompts
-# complejos; el default global (12s) caia justo en el limite. 30s da margen
-# real, y como ahora cancela la HTTP de verdad (ask_async), no hay budget
-# desperdiciado si en algun caso se pasa.
+def _env_float(name: str, default: float) -> float:
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        log.warning(f"{name} invalido ({raw!r}); usando {default}")
+        return default
+
+
+# Per-tool timeouts. Estos valores son caps de UX para voz en vivo: si un
+# reasoner externo se tarda demasiado, Gemini recupera el turno y puede proponer
+# dividir la tarea. Se pueden subir por .env cuando Isaac quiera trabajo largo.
 TOOL_TIMEOUTS_S: dict[str, float] = {
-    "ask_gpt55_code": 60.0,
-    "ask_claude_deep": 30.0,
+    "ask_gpt55_code": _env_float("JARVIS_ASK_GPT55_TIMEOUT_S", 45.0),
+    "ask_claude_deep": _env_float("JARVIS_ASK_CLAUDE_TIMEOUT_S", 30.0),
     "study_mode": 60.0,
     "obs_memory": 900.0,
     "chrome_read_page": 20.0,
+}
+
+LONG_TOOL_TIMEOUTS_S: dict[str, float] = {
+    "ask_gpt55_code": _env_float("JARVIS_ASK_GPT55_LONG_TIMEOUT_S", 120.0),
+    "ask_claude_deep": _env_float("JARVIS_ASK_CLAUDE_LONG_TIMEOUT_S", 90.0),
 }
 
 
@@ -362,6 +379,7 @@ class Jarvis:
         self.preferences = ensure_runtime_preferences(ROOT / "data" / "preferences.json")
         self.reasoner = self._build_reasoner()
         self.code_reasoner = self._build_code_reasoner()
+        self._prewarm_reasoner_clients()
         self.obsidian_mcp = ObsidianMCPClient(python_exe=sys.executable, cwd=ROOT)
 
         # Memoria Obsidian
@@ -468,6 +486,20 @@ class Jarvis:
                     log.info("Briefing proactivo inyectado al system_prompt.")
         except Exception as exc:
             log.warning(f"[WARN] proactividad (arranque) falló: {exc}")
+
+        # Auto-mejora recursiva de conocimiento (KSI, Fase 1): se ejecuta al cierre.
+        try:
+            self.knowledge_improver = KnowledgeImprover(
+                config=KnowledgeImproverConfig.from_env(),
+                embed_fn=lambda texts: self.rag._ensure_model().encode(
+                    list(texts), normalize_embeddings=True
+                ),
+                reasoner=self.reasoner,
+                proactivity_engine=self.proactivity,
+            )
+        except Exception as exc:
+            self.knowledge_improver = None
+            log.warning(f"[WARN] KSI no pudo inicializarse: {exc}")
 
         # Briefing matutino hablado: se dispara una vez por proceso en el primer
         # connect (no en reconexiones). Flag de instancia = idempotencia.
@@ -594,6 +626,7 @@ class Jarvis:
                 tracker=self.tracker,
                 tool_dispatcher=self.dispatcher,
                 tool_timeouts_s=TOOL_TIMEOUTS_S,
+                tool_long_timeouts_s=LONG_TOOL_TIMEOUTS_S,
                 context_compression=(
                     os.environ.get("JARVIS_CONTEXT_COMPRESSION", "true").lower()
                     in ("true", "1", "yes")
@@ -1398,6 +1431,30 @@ class Jarvis:
             self._log(f"[WARN] GPT55CodeReasoner no disponible: {type(exc).__name__}: {exc}")
             return None
 
+    def _prewarm_reasoner_clients(self) -> None:
+        """Quita latencia de import/cliente en la primera delegacion.
+
+        No hace requests de red: solo importa SDKs y construye clientes locales.
+        La decision de usar o no GPT/Claude sigue en el routing del prompt.
+        """
+        def _worker() -> None:
+            try:
+                if self.code_reasoner is not None and hasattr(self.code_reasoner, "warmup"):
+                    self.code_reasoner.warmup()
+                    self._log("[PREWARM] OpenAI clients listos")
+                if self.reasoner is not None:
+                    getattr(self.reasoner, "client", None)
+                    getattr(self.reasoner, "async_client", None)
+                    self._log("[PREWARM] Claude clients listos")
+            except Exception as exc:
+                self._log(f"[WARN] prewarm reasoners fallo: {type(exc).__name__}: {exc}")
+
+        threading.Thread(
+            target=_worker,
+            name="JarvisReasonerPrewarm",
+            daemon=True,
+        ).start()
+
     def _ensure_libre_models(self) -> None:
         """Carga (idempotente, thread-safe) los modelos de LIBRE: Silero VAD y,
         si el barge-in esta activo, el wakeword.
@@ -1464,6 +1521,11 @@ class Jarvis:
         except Exception as exc:
             self._log(f"[WARN] no se indexó nota de sesión: {exc}")
         self._log(f"nota de sesión guardada: {p.relative_to(self.vault.vault_path)}")
+        if getattr(self, "knowledge_improver", None) is not None:
+            try:
+                self.knowledge_improver.run(self.vault)
+            except Exception as exc:
+                self._log(f"[WARN] auto-mejora de conocimiento omitida: {exc}")
 
 
 def main() -> int:
