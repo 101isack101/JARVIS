@@ -43,3 +43,4 @@ Thumbs.db
 
 # Permitir la plantilla de entorno (solo placeholders, nunca el .env real)
 !.env.example
+data/google_token.json
