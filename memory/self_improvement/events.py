@@ -9,9 +9,8 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import date
-from pathlib import Path
 
 from . import confidence as conf_mod
 
