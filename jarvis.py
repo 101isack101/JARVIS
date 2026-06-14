@@ -64,6 +64,11 @@ from overlay.ui_thread import UiThread
 from openai_code.reasoner import GPT55CodeReasoner
 from proactivity.config import ProactivityConfig
 from proactivity.engine import ProactivityEngine
+from proactivity.morning_brief import (
+    MorningBriefConfig,
+    collect_morning_brief,
+    render_brief_prompt,
+)
 from mcp_obsidian.client import ObsidianMCPClient
 from obs_memory import OBSMemoryController
 from overlay.factory import create_overlay
@@ -463,6 +468,12 @@ class Jarvis:
                     log.info("Briefing proactivo inyectado al system_prompt.")
         except Exception as exc:
             log.warning(f"[WARN] proactividad (arranque) falló: {exc}")
+
+        # Briefing matutino hablado: se dispara una vez por proceso en el primer
+        # connect (no en reconexiones). Flag de instancia = idempotencia.
+        self._briefing_sent = False
+        self._morning_cfg = MorningBriefConfig.from_env()
+        self._briefing_block_cache = briefing_block  # vault block ya calculado
 
         skill_block = ""
         try:
@@ -1054,6 +1065,31 @@ class Jarvis:
             if self._wakeword is not None:
                 self._wakeword.reset()
             self._set_overlay_state("listening")
+
+        # Briefing matutino hablado: solo el primer connect del proceso.
+        if not self._briefing_sent and self._morning_cfg.enabled:
+            self._briefing_sent = True  # marcar antes para no reintentar en fallo
+            try:
+                if self._gemini_budget_available("[BRIEF] morning"):
+                    events_provider = None
+                    if self._morning_cfg.calendar_enabled:
+                        from integrations.google_calendar import today_events
+                        cred = Path(os.environ.get("GOOGLE_CALENDAR_CREDENTIALS", ""))
+                        events_provider = lambda: today_events(
+                            credentials_path=cred,
+                            token_path=Path("data") / "google_token.json",
+                        )
+                    data = collect_morning_brief(
+                        vault_block=self._briefing_block_cache,
+                        cfg=self._morning_cfg,
+                        events_provider=events_provider,
+                    )
+                    prompt = render_brief_prompt(
+                        data, max_age_days=self._morning_cfg.news_max_age_days)
+                    self._log("[BRIEF] enviando briefing matutino hablado")
+                    self.session.send_text(prompt)
+            except Exception as exc:
+                self._log(f"[WARN] briefing matutino falló: {exc}")
 
     def _on_connection_status(self, status: str, detail: str = "") -> None:
         self._tk(lambda: self.overlay.set_connection_status(status, detail))

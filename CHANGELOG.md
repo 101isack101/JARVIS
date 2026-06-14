@@ -4,6 +4,11 @@ Todas las versiones relevantes de JARVIS se documentan aqui.
 
 ## Unreleased
 
+- Briefing matutino hablado: al arrancar, JARVIS narra en voz un resumen con
+  pendientes del vault, estado de los repos git y titulares de IA del día
+  (reutiliza las notas del AI News Agent). Idempotente por proceso (no se repite
+  en reconexiones), fail-safe y desactivable con `JARVIS_MORNING_BRIEF=false`.
+  Calendario de Google opcional en Fase 2 (`JARVIS_BRIEF_CALENDAR=true`).
 - Tool `ask_gpt55_code` y wrapper OpenAI Responses API para delegar explicitamente
   codigo, debugging, arquitectura de software y modo agentico a GPT 5.5.
 - `JARVIS_AGENTIC_CODE_MODEL` y `JARVIS_OPENAI_TIMEOUT_S` documentados; la ruta
