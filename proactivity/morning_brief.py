@@ -28,6 +28,7 @@ class MorningBriefConfig:
     news_dir: Path = field(default_factory=lambda: Path(_DEFAULT_NEWS_DIR))
     news_items: int = 3
     news_max_age_days: int = 3
+    calendar_enabled: bool = False
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> "MorningBriefConfig":
@@ -50,6 +51,7 @@ class MorningBriefConfig:
             news_dir=Path(env.get("JARVIS_BRIEF_NEWS_DIR", str(d.news_dir))),
             news_items=_int("JARVIS_BRIEF_NEWS_ITEMS", d.news_items),
             news_max_age_days=_int("JARVIS_BRIEF_NEWS_MAX_AGE", d.news_max_age_days),
+            calendar_enabled=_bool("JARVIS_BRIEF_CALENDAR", d.calendar_enabled),
         )
 
 
@@ -63,8 +65,13 @@ class BriefData:
 
 
 def collect_morning_brief(*, vault_block: str,
-                          cfg: MorningBriefConfig) -> BriefData:
-    """Llama a cada fuente envuelta en try/except. Nunca lanza."""
+                          cfg: MorningBriefConfig,
+                          events_provider=None) -> BriefData:
+    """Llama a cada fuente envuelta en try/except. Nunca lanza.
+
+    `events_provider` es un callable opcional que devuelve la agenda (Fase 2);
+    se inyecta como dependencia para poder testear sin red.
+    """
     try:
         repos = scan_repo_status(cfg.repos_root)
     except Exception:
@@ -74,8 +81,14 @@ def collect_morning_brief(*, vault_block: str,
                               max_age_days=cfg.news_max_age_days)
     except Exception:
         news = None
+    events = []
+    if cfg.calendar_enabled and events_provider is not None:
+        try:
+            events = events_provider() or []
+        except Exception:
+            events = []
     return BriefData(vault_block=(vault_block or "").strip(),
-                     repos=repos, news=news, events=[])
+                     repos=repos, news=news, events=events)
 
 
 def _repos_line(repos: list[RepoStatus]) -> str:
