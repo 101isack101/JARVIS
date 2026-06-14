@@ -43,6 +43,8 @@ _WHAT_BY_KIND = {
     "open_loop": "Cerrar una decisión que no avanzó",
     "cross_project": "Reutilizar algo ya resuelto en otro proyecto",
     "ctx_pending": "Hay un pendiente abierto del proyecto que mencionaste",
+    "memory_merge": "Fusionar dos memorias duplicadas",
+    "memory_supersede": "Resolver una contradicción entre dos memorias",
 }
 
 
