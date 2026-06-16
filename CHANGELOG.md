@@ -11,6 +11,11 @@ Todas las versiones relevantes de JARVIS se documentan aqui.
   detecta duplicados por coseno) y propone fusiones/contradicciones vía el morning
   briefing (HITL). Modelo evento→proyección regenerable; fail-safe total; métricas de
   salud en `Jarvis Memory/self-improvement/`. Paquete `memory/self_improvement/`.
+- Detección de lagunas de conocimiento (KSI Fase 2): al cerrar sesión, JARVIS detecta cards
+  pobres, hechos obsoletos y contradicciones abiertas, formula preguntas naturales (reasoner
+  presupuestado) y las persiste en la sección "Preguntas abiertas" de cada card. El motor de
+  proactividad las pregunta de forma fluida en conversación y briefing, con anti-spam (cooldown
+  /dedup por gap_id) y auto-retiro determinista al responderlas. Módulo `memory/self_improvement/gaps.py`.
 - Briefing matutino hablado: al arrancar, JARVIS narra en voz un resumen con
   pendientes del vault, estado de los repos git y titulares de IA del día
   (reutiliza las notas del AI News Agent). Idempotente por proceso (no se repite

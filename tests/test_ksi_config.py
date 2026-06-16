@@ -28,3 +28,15 @@ def test_from_env_overrides():
 def test_from_env_bad_values_fall_back():
     cfg = KnowledgeImproverConfig.from_env({"JARVIS_KSI_SIM_THRESHOLD": "abc"})
     assert cfg.sim_threshold == KnowledgeImproverConfig().sim_threshold
+
+
+def test_gap_config_defaults_and_env():
+    cfg = KnowledgeImproverConfig()
+    assert cfg.min_card_bullets >= 1
+    assert 0.0 < cfg.stale_confidence < 1.0
+    cfg2 = KnowledgeImproverConfig.from_env({
+        "JARVIS_KSI_MIN_CARD_BULLETS": "6",
+        "JARVIS_KSI_STALE_CONFIDENCE": "0.25",
+    })
+    assert cfg2.min_card_bullets == 6
+    assert cfg2.stale_confidence == 0.25

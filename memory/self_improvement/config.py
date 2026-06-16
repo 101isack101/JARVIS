@@ -20,6 +20,8 @@ class KnowledgeImproverConfig:
     token_budget: int = 1500            # tokens máximos para el reasoner por corrida
     decay_half_life_days: int = 45      # vida media del decaimiento de confianza
     min_cluster_size: int = 2           # tamaño mínimo de cluster de duplicados
+    min_card_bullets: int = 4           # umbral de "card pobre"
+    stale_confidence: float = 0.3       # confianza decaída bajo la cual un hecho es "obsoleto"
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> "KnowledgeImproverConfig":
@@ -50,4 +52,6 @@ class KnowledgeImproverConfig:
             token_budget=_int("JARVIS_KSI_TOKEN_BUDGET", d.token_budget),
             decay_half_life_days=_int("JARVIS_KSI_DECAY_HALF_LIFE_DAYS", d.decay_half_life_days),
             min_cluster_size=_int("JARVIS_KSI_MIN_CLUSTER_SIZE", d.min_cluster_size),
+            min_card_bullets=_int("JARVIS_KSI_MIN_CARD_BULLETS", d.min_card_bullets),
+            stale_confidence=_float("JARVIS_KSI_STALE_CONFIDENCE", d.stale_confidence),
         )
