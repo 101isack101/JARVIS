@@ -64,3 +64,48 @@ def test_collect_gaps_merges_all_kinds():
     gaps = collect_gaps([poor], [stale], _Cfg(), today="2026-06-15")
     kinds = {g.kind for g in gaps}
     assert "poor_card" in kinds and "stale_fact" in kinds
+
+
+from memory.self_improvement.gaps import formulate_questions
+
+
+class _Resp:
+    def __init__(self, text): self.text = text
+
+
+class _Reasoner:
+    def __init__(self, text): self._text = text; self.calls = 0
+    def ask(self, instructions, context_extra="", max_tokens=600):
+        self.calls += 1
+        return _Resp(self._text)
+
+
+def _gap(gid="g1"):
+    return KnowledgeGap(gap_id=gid, kind="poor_card", project="JARVIS",
+                        key="JARVIS", context="card vacía")
+
+
+def test_formulate_assigns_questions_by_gap_id():
+    gaps = [_gap("g1"), _gap("g2")]
+    reasoner = _Reasoner('{"g1": "¿En qué estás con JARVIS?", "g2": "¿Y con esto?"}')
+    out = formulate_questions(reasoner, gaps, token_budget=1000)
+    by_id = {g.gap_id: g.question for g in out}
+    assert by_id["g1"] == "¿En qué estás con JARVIS?"
+    assert by_id["g2"] == "¿Y con esto?"
+
+
+def test_formulate_skips_without_budget():
+    reasoner = _Reasoner('{"g1": "x"}')
+    out = formulate_questions(reasoner, [_gap("g1")], token_budget=0)
+    assert out[0].question == ""
+    assert reasoner.calls == 0
+
+
+def test_formulate_bad_json_leaves_questions_empty():
+    reasoner = _Reasoner("no json")
+    out = formulate_questions(reasoner, [_gap("g1")], token_budget=1000)
+    assert out[0].question == ""
+
+
+def test_formulate_no_gaps_returns_empty():
+    assert formulate_questions(_Reasoner("{}"), [], token_budget=1000) == []

@@ -7,10 +7,11 @@ formular preguntas naturales. Reusa confianza y contradicciones de Fase 1.
 from __future__ import annotations
 
 import hashlib
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from . import confidence as conf_mod
 from .detectors import detect_contradictions
+from .judge import _extract_json
 
 
 @dataclass(frozen=True)
@@ -83,3 +84,31 @@ def collect_gaps(states, events, cfg, *, today=None) -> list[KnowledgeGap]:
     gaps.extend(detect_stale_facts(events, cfg, today=today))
     gaps.extend(detect_open_contradictions(events))
     return gaps
+
+
+_FORMULATE_INSTRUCTIONS = (
+    "Eres JARVIS. Te paso lagunas en tu conocimiento sobre los proyectos de Isaac. "
+    "Por cada una, formula UNA pregunta breve, natural y en español (primera persona, "
+    "directa, sin jerga técnica ni la palabra 'laguna'). Responde SOLO un objeto JSON "
+    "que mapea gap_id -> pregunta. Ejemplo: {\"abc123\": \"¿Sigue vigente X?\"}."
+)
+
+
+def formulate_questions(reasoner, gaps: list[KnowledgeGap], *, token_budget: int, max_tokens: int = 600) -> list[KnowledgeGap]:
+    if not gaps:
+        return []
+    if reasoner is None or token_budget <= 0:
+        return list(gaps)
+    payload = "\n".join(f"- {g.gap_id}: {g.context}" for g in gaps)
+    try:
+        resp = reasoner.ask(_FORMULATE_INSTRUCTIONS, context_extra="LAGUNAS:\n" + payload, max_tokens=max_tokens)
+        data = _extract_json(getattr(resp, "text", "") or "")
+    except Exception:
+        return list(gaps)
+    if not isinstance(data, dict):
+        return list(gaps)
+    out: list[KnowledgeGap] = []
+    for g in gaps:
+        q = data.get(g.gap_id)
+        out.append(replace(g, question=str(q).strip()) if isinstance(q, str) and q.strip() else g)
+    return out
