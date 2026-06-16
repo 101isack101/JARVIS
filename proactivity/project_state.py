@@ -9,7 +9,7 @@ Solo lee archivos; sin LLM, sin embeddings. Fail-safe por proyecto.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date
 
 PLACEHOLDER = "- (pending)"
@@ -43,6 +43,16 @@ def section_bullets(sections: dict[str, list[str]], name: str) -> list[str]:
     return list(sections.get(name, []))
 
 
+def _open_questions_from_body(body: str) -> list[dict]:
+    """Preguntas abiertas (no resueltas) de la card, como [{"text","gap_id"}]."""
+    from memory.self_improvement.gaps import parse_questions_section
+    out: list[dict] = []
+    for gid, rec in parse_questions_section(body).items():
+        if rec.get("status") == "open":
+            out.append({"text": rec.get("display", ""), "gap_id": gid})
+    return out
+
+
 from datetime import datetime
 from pathlib import Path
 
@@ -63,6 +73,7 @@ class ProjectState:
     current_state: list[str]
     importance: str
     confidence: str
+    open_questions: list[dict] = field(default_factory=list)
 
 
 def _extract_section_text(body: str, heading: str) -> str:
@@ -150,6 +161,7 @@ def build_project_states(
             importance, confidence = "normal", "medium"
 
         staleness = (today - last).days if last is not None else None
+        open_questions = _open_questions_from_body(note.body or "") if note is not None else []
         states.append(
             ProjectState(
                 project=project,
@@ -160,6 +172,7 @@ def build_project_states(
                 current_state=section_bullets(sections, "Current State"),
                 importance=importance,
                 confidence=confidence,
+                open_questions=open_questions,
             )
         )
     return states
