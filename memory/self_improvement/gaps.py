@@ -124,16 +124,17 @@ QUESTIONS_HEADING = "Preguntas abiertas"
 _GAP_TAG_RE = re.compile(r"<!--\s*ksi-gap:(?P<json>\{.*?\})\s*-->\s*$")
 
 
-def serialize_gap_bullet(text: str, *, gap_id: str, kind: str, status: str, today: str) -> str:
+def _gap_tag(gap_id: str, kind: str, status: str) -> str:
     meta = {"gap_id": gap_id, "kind": kind, "status": status}
-    tag = "<!-- ksi-gap:" + json.dumps(meta, ensure_ascii=False, separators=(",", ":")) + " -->"
-    return f"- {today} {text} {tag}"
+    return "<!-- ksi-gap:" + json.dumps(meta, ensure_ascii=False, separators=(",", ":")) + " -->"
+
+
+def serialize_gap_bullet(text: str, *, gap_id: str, kind: str, status: str, today: str) -> str:
+    return f"- {today} {text} {_gap_tag(gap_id, kind, status)}"
 
 
 def _serialize_existing(display: str, *, gap_id: str, kind: str, status: str) -> str:
-    meta = {"gap_id": gap_id, "kind": kind, "status": status}
-    tag = "<!-- ksi-gap:" + json.dumps(meta, ensure_ascii=False, separators=(",", ":")) + " -->"
-    return f"- {display} {tag}"
+    return f"- {display} {_gap_tag(gap_id, kind, status)}"
 
 
 def parse_questions_section(body: str) -> dict:
