@@ -65,3 +65,34 @@ def test_run_is_fail_safe_when_embed_raises(tmp_path):
         reasoner=None,
     )
     imp.run(_FakeVault(tmp_path))  # must NOT raise
+
+
+def test_run_writes_open_questions_section(tmp_path):
+    from memory.self_improvement.config import KnowledgeImproverConfig
+    from memory.self_improvement.gaps import gap_id
+    from memory.obsidian_vault import ObsidianVault
+    from memory import triage as triage_mod
+
+    base = _ev("hecho muy viejo")
+    old_event = base.__class__(
+        id=base.id, text=base.text, section=base.section, project=base.project,
+        learned_at="2026-01-01", confidence=0.8,
+    )
+    gid = gap_id("stale_fact", old_event.project, old_event.id)
+
+    class _Resp:
+        text = '{"%s": "¿Sigue vigente esto?"}' % gid
+
+    class _Reasoner:
+        def ask(self, *a, **k):
+            return _Resp()
+
+    imp = KnowledgeImprover(
+        config=KnowledgeImproverConfig(token_budget=1000),
+        embed_fn=_embed, reasoner=_Reasoner(), event_loader=lambda _v: [old_event],
+    )
+    vault = ObsidianVault(vault_path=tmp_path)
+    imp.run(vault)
+    card = triage_mod.project_card_path(vault, old_event.project)
+    assert card.exists()
+    assert "Preguntas abiertas" in card.read_text(encoding="utf-8")

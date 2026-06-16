@@ -18,6 +18,7 @@ from .detectors import detect_contradictions, detect_duplicate_clusters
 from .events import MemoryEvent
 from .judge import judge_merge
 from .proposer import to_signals
+from . import gaps as gaps_mod
 
 EventLoader = Callable[[object], list[MemoryEvent]]
 
@@ -77,6 +78,25 @@ class KnowledgeImprover:
                 self.proactivity_engine.queue.ingest(signals)
             except Exception:
                 pass
+
+        # Fase 2 — detección de lagunas + preguntas (aditivo, presupuestado).
+        try:
+            from proactivity.project_state import build_project_states
+            states = build_project_states(vault)
+        except Exception:
+            states = []
+        try:
+            detected = gaps_mod.collect_gaps(states, events, self.config)
+            formulated = gaps_mod.formulate_questions(self.reasoner, detected, token_budget=budget)
+            by_project: dict[str, list] = {}
+            for g in formulated:
+                by_project.setdefault(g.project, []).append(g)
+            for project, pgaps in by_project.items():
+                active = {g.gap_id for g in pgaps}
+                with_q = [g for g in pgaps if g.question]
+                gaps_mod.apply_questions(vault, project, with_q, active)
+        except Exception:
+            pass
 
         memory_path = Path(vault.memory_path)
         actions = [
