@@ -28,7 +28,8 @@ class Opportunity:
 def opportunity_id(signal: Signal) -> str:
     """Hash estable por (kind, project, payload-clave) para dedup/cooldown."""
     key = (
-        signal.payload.get("pending")
+        signal.payload.get("gap_id")
+        or signal.payload.get("pending")
         or signal.payload.get("decision")
         or signal.payload.get("snippet")
         or ""
@@ -45,6 +46,7 @@ _WHAT_BY_KIND = {
     "ctx_pending": "Hay un pendiente abierto del proyecto que mencionaste",
     "memory_merge": "Fusionar dos memorias duplicadas",
     "memory_supersede": "Resolver una contradicción entre dos memorias",
+    "knowledge_gap": "Preguntar algo que falta saber del proyecto",
 }
 
 

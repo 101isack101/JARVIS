@@ -82,6 +82,22 @@ def _open_loop(states: list[ProjectState], cfg: ProactivityConfig) -> list[Signa
     return out
 
 
+def _knowledge_gap(states, cfg) -> list[Signal]:
+    out: list[Signal] = []
+    for st in states:
+        for q in getattr(st, "open_questions", []):
+            out.append(
+                Signal(
+                    kind="knowledge_gap",
+                    project=st.project,
+                    payload={"snippet": q["text"], "gap_id": q["gap_id"]},
+                    base_priority=0.5,
+                    evidence=[f"card:{st.project}"],
+                )
+            )
+    return out
+
+
 def detect_startup_signals(
     states: list[ProjectState], cfg: ProactivityConfig
 ) -> list[Signal]:
@@ -90,6 +106,7 @@ def detect_startup_signals(
     signals.extend(_stale_pending(states, cfg))
     signals.extend(_stale_project(states, cfg))
     signals.extend(_open_loop(states, cfg))
+    signals.extend(_knowledge_gap(states, cfg))
     return signals
 
 
@@ -114,6 +131,27 @@ def _ctx_pending(active_project: str | None, states: list[ProjectState]) -> list
             evidence=[f"card:{active_project}"],
         )
     ]
+
+
+def _ctx_knowledge_gap(active_project, states) -> list[Signal]:
+    if not active_project:
+        return []
+    by_name = {st.project: st for st in states}
+    st = by_name.get(active_project)
+    if st is None:
+        return []
+    out: list[Signal] = []
+    for q in getattr(st, "open_questions", []):
+        out.append(
+            Signal(
+                kind="knowledge_gap",
+                project=active_project,
+                payload={"snippet": q["text"], "gap_id": q["gap_id"]},
+                base_priority=0.72,
+                evidence=[f"card:{active_project}"],
+            )
+        )
+    return out
 
 
 def _cross_project(turn_text: str, active_project: str | None, rag) -> list[Signal]:
@@ -156,4 +194,5 @@ def detect_contextual_signals(
     signals: list[Signal] = []
     signals.extend(_ctx_pending(active, states))
     signals.extend(_cross_project(turn_text or "", active, rag))
+    signals.extend(_ctx_knowledge_gap(active, states))
     return signals
