@@ -109,3 +109,48 @@ def test_formulate_bad_json_leaves_questions_empty():
 
 def test_formulate_no_gaps_returns_empty():
     assert formulate_questions(_Reasoner("{}"), [], token_budget=1000) == []
+
+
+from memory.self_improvement.gaps import (
+    apply_questions,
+    parse_questions_section,
+    serialize_gap_bullet,
+)
+from memory.obsidian_vault import ObsidianVault
+
+
+def _vault(tmp_path):
+    return ObsidianVault(vault_path=tmp_path)
+
+
+def test_serialize_and_parse_roundtrip():
+    line = serialize_gap_bullet("¿Sigue vigente X?", gap_id="abc123", kind="stale_fact",
+                                status="open", today="2026-06-15")
+    parsed = parse_questions_section("## Preguntas abiertas\n\n" + line + "\n")
+    assert "abc123" in parsed
+    assert parsed["abc123"]["status"] == "open"
+    assert "¿Sigue vigente X?" in parsed["abc123"]["display"]
+
+
+def test_apply_writes_and_dedups(tmp_path):
+    vault = _vault(tmp_path)
+    g = KnowledgeGap(gap_id="g1", kind="poor_card", project="JARVIS", key="JARVIS",
+                     context="x", question="¿En qué estás con JARVIS?")
+    apply_questions(vault, "JARVIS", [g], active_gap_ids={"g1"}, today="2026-06-15")
+    apply_questions(vault, "JARVIS", [g], active_gap_ids={"g1"}, today="2026-06-15")
+    from memory import triage as triage_mod
+    body = triage_mod.project_card_path(vault, "JARVIS").read_text(encoding="utf-8")
+    assert body.count("g1") == 1
+    assert "¿En qué estás con JARVIS?" in body
+
+
+def test_apply_auto_retires_absent_gaps(tmp_path):
+    vault = _vault(tmp_path)
+    g = KnowledgeGap(gap_id="g1", kind="poor_card", project="JARVIS", key="JARVIS",
+                     context="x", question="¿Pregunta vieja?")
+    apply_questions(vault, "JARVIS", [g], active_gap_ids={"g1"}, today="2026-06-15")
+    apply_questions(vault, "JARVIS", [], active_gap_ids=set(), today="2026-06-16")
+    from memory import triage as triage_mod
+    body = triage_mod.project_card_path(vault, "JARVIS").read_text(encoding="utf-8")
+    parsed = parse_questions_section(body)
+    assert parsed["g1"]["status"] == "resolved"
