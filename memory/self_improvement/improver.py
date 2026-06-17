@@ -32,18 +32,31 @@ class KnowledgeImprover:
         reasoner=None,
         proactivity_engine=None,
         event_loader: EventLoader | None = None,
+        retrieval_curator=None,
+        chunk_keys_provider=None,
     ) -> None:
         self.config = config
         self.embed_fn = embed_fn
         self.reasoner = reasoner
         self.proactivity_engine = proactivity_engine
         self._event_loader = event_loader or _default_event_loader
+        self.retrieval_curator = retrieval_curator
+        self._chunk_keys_provider = chunk_keys_provider
 
     def run(self, vault) -> None:
         if not self.config.enabled:
             return
         try:
             self._run_inner(vault)
+        except Exception:
+            pass
+
+    def run_curator_housekeeping(self, *, today=None) -> None:
+        if self.retrieval_curator is None:
+            return
+        try:
+            valid = self._chunk_keys_provider() if self._chunk_keys_provider else None
+            self.retrieval_curator.housekeeping(valid_keys=valid, today=today)
         except Exception:
             pass
 
@@ -97,6 +110,9 @@ class KnowledgeImprover:
                 gaps_mod.apply_questions(vault, project, with_q, active)
         except Exception:
             pass
+
+        # Fase 3 - housekeeping del curador de RAG (decay + purga de huerfanos).
+        self.run_curator_housekeeping()
 
         memory_path = Path(vault.memory_path)
         actions = [

@@ -205,3 +205,25 @@ def test_build_context_invokes_curator(tmp_path, monkeypatch):
     assert cur._chunks[RetrievalCurator.chunk_key("p.md", "buena")]["retrieved"] == 11
     # "mala" cayo bajo MIN_RAG_SCORE (0.30*0.6=0.18 < 0.25); "buena" sobrevive
     assert "buena" in res.text and "mala" not in res.text
+
+
+from memory.self_improvement.improver import KnowledgeImprover
+
+
+def test_improver_runs_curator_housekeeping(tmp_path):
+    cfg = KnowledgeImproverConfig(enabled=True)
+    cur = RetrievalCurator(config=cfg, embed_fn=lambda t: np.zeros((len(t), 2), "float32"),
+                           state_path=tmp_path / "u.json")
+    cur._chunks["orphan"] = {"retrieved": 5, "used": 1, "last_used": None, "last_touch": "2026-06-15"}
+    cur._chunks["keep"] = {"retrieved": 5, "used": 1, "last_used": None, "last_touch": "2026-06-15"}
+
+    imp = KnowledgeImprover(
+        config=cfg,
+        embed_fn=lambda t: np.zeros((len(t), 2), "float32"),
+        event_loader=lambda v: [],   # sin eventos: _run_inner sale temprano
+        retrieval_curator=cur,
+        chunk_keys_provider=lambda: {"keep"},
+    )
+    imp.run_curator_housekeeping(today="2026-06-15")
+    assert "orphan" not in cur._chunks
+    assert "keep" in cur._chunks

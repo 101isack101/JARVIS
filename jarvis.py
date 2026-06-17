@@ -64,6 +64,7 @@ from overlay.ui_thread import UiThread
 from openai_code.reasoner import GPT55CodeReasoner
 from memory.self_improvement import KnowledgeImprover
 from memory.self_improvement.config import KnowledgeImproverConfig
+from memory.self_improvement.retrieval_curation import RetrievalCurator
 from proactivity.config import ProactivityConfig
 from proactivity.engine import ProactivityEngine
 from proactivity.morning_brief import (
@@ -487,6 +488,23 @@ class Jarvis:
         except Exception as exc:
             log.warning(f"[WARN] proactividad (arranque) falló: {exc}")
 
+        # Curador de recuperaciones del RAG (KSI Fase 3): gated por JARVIS_RAG_CURATION.
+        self.retrieval_curator = None
+        try:
+            _ksi_cfg = KnowledgeImproverConfig.from_env()
+            if _ksi_cfg.rag_curation_enabled:
+                from memory.self_improvement.retrieval_curation import RetrievalCurator
+                self.retrieval_curator = RetrievalCurator(
+                    config=_ksi_cfg,
+                    embed_fn=lambda texts: self.rag._ensure_model().encode(
+                        list(texts), normalize_embeddings=True
+                    ),
+                    state_path=Path("data") / "rag_usage.json",
+                )
+        except Exception as exc:
+            self.retrieval_curator = None
+            log.warning(f"[WARN] curador de RAG no pudo inicializarse: {exc}")
+
         # Auto-mejora recursiva de conocimiento (KSI, Fase 1): se ejecuta al cierre.
         try:
             self.knowledge_improver = KnowledgeImprover(
@@ -496,6 +514,11 @@ class Jarvis:
                 ),
                 reasoner=self.reasoner,
                 proactivity_engine=self.proactivity,
+                retrieval_curator=self.retrieval_curator,
+                chunk_keys_provider=lambda: {
+                    RetrievalCurator.chunk_key(c.rel_path, c.text)
+                    for c in self.rag.chunks if c.text
+                },
             )
         except Exception as exc:
             self.knowledge_improver = None
@@ -540,6 +563,7 @@ class Jarvis:
             approvals=self.approvals,
             set_listen_mode=self._apply_listen_mode,
             proactivity=self.proactivity,
+            retrieval_curator=self.retrieval_curator,
         )
         self.dispatcher = ToolDispatcher(self.tool_ctx)
         self.indexer = IncrementalIndexer(
