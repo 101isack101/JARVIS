@@ -47,6 +47,43 @@ class RetrievalCurator:
         factor = floor + rate * (ceil - floor)
         return max(floor, min(ceil, factor))
 
+    @staticmethod
+    def _prompt_hash(prompt: str) -> str:
+        return hashlib.sha1((prompt or "").encode("utf-8")).hexdigest()[:16]
+
+    def _stat(self, key: str) -> dict:
+        return self._chunks.setdefault(
+            key, {"retrieved": 0, "used": 0, "last_used": None, "last_touch": None}
+        )
+
+    def rerank(self, results: list) -> list:
+        try:
+            adjusted = []
+            for r in results:
+                key = self.chunk_key(r.chunk.rel_path, r.chunk.text)
+                r.score = r.score * self.quality_factor(key)
+                adjusted.append(r)
+            adjusted.sort(key=lambda r: r.score, reverse=True)
+            return adjusted
+        except Exception:
+            return results
+
+    def note_retrieval(self, prompt: str, results: list, *, today=None) -> None:
+        try:
+            today = today or date.today().isoformat()
+            pend: list = []
+            for r in results:
+                key = self.chunk_key(r.chunk.rel_path, r.chunk.text)
+                st = self._stat(key)
+                st["retrieved"] += 1
+                st["last_touch"] = today
+                pend.append([key, r.chunk.text])
+            if pend:
+                self._pending[self._prompt_hash(prompt)] = pend
+                self._save()
+        except Exception:
+            pass
+
     # ---- persistencia atomica ----
     def _load(self) -> None:
         try:

@@ -62,3 +62,57 @@ def test_quality_factor_linear(tmp_path):
             "last_used": None, "last_touch": None,
         }
         assert abs(cur.quality_factor(f"k{i}") - expected) < 1e-9
+
+
+from dataclasses import dataclass
+
+
+@dataclass
+class _Chunk:
+    rel_path: str
+    text: str
+    title: str = ""
+
+
+@dataclass
+class _Result:
+    chunk: _Chunk
+    score: float
+
+
+def test_rerank_reorders_by_factor(tmp_path):
+    cur = _curator(tmp_path, cold_start_min=2, factor_floor=0.6, factor_ceil=1.4)
+    a = _Result(_Chunk("p.md", "alpha"), 0.50)   # mala: factor 0.6 -> 0.30
+    b = _Result(_Chunk("p.md", "beta"), 0.45)    # buena: factor 1.4 -> 0.63
+    cur._chunks[RetrievalCurator.chunk_key("p.md", "alpha")] = {"retrieved": 10, "used": 0, "last_used": None, "last_touch": None}
+    cur._chunks[RetrievalCurator.chunk_key("p.md", "beta")] = {"retrieved": 10, "used": 10, "last_used": None, "last_touch": None}
+    out = cur.rerank([a, b])
+    assert [r.chunk.text for r in out] == ["beta", "alpha"]
+    assert abs(out[0].score - 0.63) < 1e-9
+
+
+def test_rerank_neutral_when_no_stats(tmp_path):
+    cur = _curator(tmp_path)
+    a = _Result(_Chunk("p.md", "alpha"), 0.50)
+    b = _Result(_Chunk("p.md", "beta"), 0.40)
+    out = cur.rerank([a, b])
+    assert [r.chunk.text for r in out] == ["alpha", "beta"]   # orden intacto, scores neutrales
+
+
+def test_rerank_is_fail_safe(tmp_path):
+    cur = _curator(tmp_path)
+    bad = object()  # sin .chunk / .score
+    out = cur.rerank([bad])
+    assert out == [bad]   # devuelve la lista intacta, no propaga
+
+
+def test_note_retrieval_increments_and_persists(tmp_path):
+    cur = _curator(tmp_path)
+    r = _Result(_Chunk("p.md", "alpha"), 0.5)
+    cur.note_retrieval("que es alpha?", [r])
+    key = RetrievalCurator.chunk_key("p.md", "alpha")
+    assert cur._chunks[key]["retrieved"] == 1
+    # pending guarda [key, text] bajo el hash del prompt
+    reloaded = RetrievalCurator(config=cur.config, embed_fn=cur.embed_fn, state_path=cur.state_path)
+    assert reloaded._chunks[key]["retrieved"] == 1
+    assert any(key == k for pend in reloaded._pending.values() for k, _ in pend)
