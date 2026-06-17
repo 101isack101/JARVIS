@@ -84,6 +84,31 @@ class RetrievalCurator:
         except Exception:
             pass
 
+    def attribute_usage(self, prompt: str, response_text: str, *, today=None) -> None:
+        try:
+            phash = self._prompt_hash(prompt)
+            pend = self._pending.get(phash)
+            if not pend or not (response_text or "").strip():
+                return
+            today = today or date.today().isoformat()
+            texts = [response_text] + [text for _, text in pend]
+            emb = np.asarray(self.embed_fn(texts), dtype="float32")
+            resp_vec = emb[0]
+            resp_norm = float(np.linalg.norm(resp_vec)) or 1.0
+            for i, (key, _text) in enumerate(pend):
+                vec = emb[i + 1]
+                denom = (float(np.linalg.norm(vec)) or 1.0) * resp_norm
+                cos = float(np.dot(resp_vec, vec)) / denom
+                if cos >= self.config.use_threshold:
+                    st = self._stat(key)
+                    st["used"] += 1
+                    st["last_used"] = today
+                    st["last_touch"] = today
+            self._pending.pop(phash, None)
+            self._save()
+        except Exception:
+            pass
+
     # ---- persistencia atomica ----
     def _load(self) -> None:
         try:

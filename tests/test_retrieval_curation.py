@@ -116,3 +116,43 @@ def test_note_retrieval_increments_and_persists(tmp_path):
     reloaded = RetrievalCurator(config=cur.config, embed_fn=cur.embed_fn, state_path=cur.state_path)
     assert reloaded._chunks[key]["retrieved"] == 1
     assert any(key == k for pend in reloaded._pending.values() for k, _ in pend)
+
+
+import numpy as np
+
+
+def _lookup_embed(mapping):
+    """embed_fn fake: devuelve el vector mapeado por texto (ya normalizado)."""
+    def _fn(texts):
+        return np.array([mapping[t] for t in texts], dtype="float32")
+    return _fn
+
+
+def test_attribute_usage_counts_only_used(tmp_path):
+    cfg = KnowledgeImproverConfig(use_threshold=0.55)
+    mapping = {
+        "respuesta sobre alpha": [1.0, 0.0],
+        "alpha":                 [1.0, 0.0],   # coseno 1.0 -> usado
+        "beta":                  [0.0, 1.0],   # coseno 0.0 -> no usado
+    }
+    cur = RetrievalCurator(config=cfg, embed_fn=_lookup_embed(mapping), state_path=tmp_path / "u.json")
+    ra = _Result(_Chunk("p.md", "alpha"), 0.5)
+    rb = _Result(_Chunk("p.md", "beta"), 0.5)
+    cur.note_retrieval("q", [ra, rb])
+    cur.attribute_usage("q", "respuesta sobre alpha")
+    ka = RetrievalCurator.chunk_key("p.md", "alpha")
+    kb = RetrievalCurator.chunk_key("p.md", "beta")
+    assert cur._chunks[ka]["used"] == 1
+    assert cur._chunks[kb]["used"] == 0
+    assert cur._pending == {}   # se limpio el pending del prompt
+
+
+def test_attribute_usage_is_fail_safe(tmp_path):
+    def _boom(texts):
+        raise RuntimeError("embed caido")
+    cfg = KnowledgeImproverConfig()
+    cur = RetrievalCurator(config=cfg, embed_fn=_boom, state_path=tmp_path / "u.json")
+    cur._chunks["k"] = {"retrieved": 1, "used": 0, "last_used": None, "last_touch": None}
+    cur._pending = {RetrievalCurator._prompt_hash("q"): [["k", "alpha"]]}
+    cur.attribute_usage("q", "cualquier respuesta")   # no debe propagar
+    assert cur._chunks["k"]["used"] == 0
