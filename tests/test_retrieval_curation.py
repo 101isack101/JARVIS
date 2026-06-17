@@ -180,3 +180,28 @@ def test_housekeeping_drops_negligible(tmp_path):
     cur._chunks["tiny"] = {"retrieved": 1, "used": 0, "last_used": None, "last_touch": "2026-01-01"}
     cur.housekeeping(valid_keys=None, today="2026-06-15")   # >> 10 dias -> retrieved ~ 0
     assert "tiny" not in cur._chunks
+
+
+from memory.context_assembler import build_project_context
+
+
+class _FakeRAG:
+    def search(self, query, top_k=3):
+        return [
+            _Result(_Chunk("p.md", "buena", title="T"), 0.30),
+            _Result(_Chunk("p.md", "mala", title="T"), 0.30),
+        ]
+
+
+def test_build_context_invokes_curator(tmp_path, monkeypatch):
+    import memory.context_assembler as ca
+    monkeypatch.setattr(ca.triage_mod, "detect_project", lambda p: "ProjX")
+    monkeypatch.setattr(ca, "_load_card_body", lambda v, p: "")
+    cur = _curator(tmp_path, cold_start_min=2)
+    cur._chunks[RetrievalCurator.chunk_key("p.md", "buena")] = {"retrieved": 10, "used": 10, "last_used": None, "last_touch": None}
+    cur._chunks[RetrievalCurator.chunk_key("p.md", "mala")] = {"retrieved": 10, "used": 0, "last_used": None, "last_touch": None}
+    res = build_project_context(vault=None, rag=_FakeRAG(), prompt="algo de ProjX", curator=cur)
+    # note_retrieval corrio: el chunk "buena" tiene retrieved incrementado
+    assert cur._chunks[RetrievalCurator.chunk_key("p.md", "buena")]["retrieved"] == 11
+    # "mala" cayo bajo MIN_RAG_SCORE (0.30*0.6=0.18 < 0.25); "buena" sobrevive
+    assert "buena" in res.text and "mala" not in res.text

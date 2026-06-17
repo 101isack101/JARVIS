@@ -86,6 +86,7 @@ def build_project_context(
     *,
     token_budget: int = DEFAULT_TOKEN_BUDGET,
     semantic_memory=None,
+    curator=None,
 ) -> ContextResult:
     project = triage_mod.detect_project(prompt or "")
     if not project:
@@ -110,6 +111,9 @@ def build_project_context(
     try:
         searcher = semantic_memory or rag
         rag_results = searcher.search(prompt, top_k=RAG_TOP_K)
+        if curator is not None:
+            rag_results = curator.rerank(rag_results)
+            curator.note_retrieval(prompt, rag_results)
     except Exception:
         rag_results = []
     rag_text, rag_count = _format_rag(rag_results)
