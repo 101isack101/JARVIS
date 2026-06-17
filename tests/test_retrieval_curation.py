@@ -156,3 +156,27 @@ def test_attribute_usage_is_fail_safe(tmp_path):
     cur._pending = {RetrievalCurator._prompt_hash("q"): [["k", "alpha"]]}
     cur.attribute_usage("q", "cualquier respuesta")   # no debe propagar
     assert cur._chunks["k"]["used"] == 0
+
+
+def test_housekeeping_decays_and_purges(tmp_path):
+    cfg = KnowledgeImproverConfig(usage_decay_days=45)
+    cur = RetrievalCurator(config=cfg, embed_fn=lambda t: np.zeros((len(t), 2), "float32"),
+                           state_path=tmp_path / "u.json")
+    # chunk stale: tocado hace 45 dias -> factor 0.5
+    cur._chunks["stale"] = {"retrieved": 12, "used": 8, "last_used": "2026-05-01", "last_touch": "2026-05-01"}
+    # chunk huerfano: no esta en valid_keys -> se elimina
+    cur._chunks["orphan"] = {"retrieved": 5, "used": 2, "last_used": None, "last_touch": "2026-06-15"}
+    cur.housekeeping(valid_keys={"stale"}, today="2026-06-15")
+    assert "orphan" not in cur._chunks
+    assert abs(cur._chunks["stale"]["retrieved"] - 6.0) < 1e-6
+    assert abs(cur._chunks["stale"]["used"] - 4.0) < 1e-6
+    assert cur._chunks["stale"]["last_touch"] == "2026-06-15"
+
+
+def test_housekeeping_drops_negligible(tmp_path):
+    cfg = KnowledgeImproverConfig(usage_decay_days=10)
+    cur = RetrievalCurator(config=cfg, embed_fn=lambda t: np.zeros((len(t), 2), "float32"),
+                           state_path=tmp_path / "u.json")
+    cur._chunks["tiny"] = {"retrieved": 1, "used": 0, "last_used": None, "last_touch": "2026-01-01"}
+    cur.housekeeping(valid_keys=None, today="2026-06-15")   # >> 10 dias -> retrieved ~ 0
+    assert "tiny" not in cur._chunks

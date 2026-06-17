@@ -12,7 +12,7 @@ import hashlib
 import json
 import os
 import re
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 
 import numpy as np
@@ -105,6 +105,40 @@ class RetrievalCurator:
                     st["last_used"] = today
                     st["last_touch"] = today
             self._pending.pop(phash, None)
+            self._save()
+        except Exception:
+            pass
+
+    @staticmethod
+    def _age_days(iso: str | None, today: str) -> int:
+        if not iso:
+            return 0
+        try:
+            d0 = datetime.fromisoformat(iso).date()
+            d1 = datetime.fromisoformat(today).date()
+            return max(0, (d1 - d0).days)
+        except Exception:
+            return 0
+
+    def housekeeping(self, *, valid_keys=None, today=None) -> None:
+        try:
+            today = today or date.today().isoformat()
+            half = max(1, self.config.usage_decay_days)
+            for key in list(self._chunks.keys()):
+                if valid_keys is not None and key not in valid_keys:
+                    del self._chunks[key]
+                    continue
+                st = self._chunks[key]
+                age = self._age_days(st.get("last_touch"), today)
+                if age > 0:
+                    f = 0.5 ** (age / half)
+                    st["retrieved"] = st.get("retrieved", 0) * f
+                    st["used"] = st.get("used", 0) * f
+                    st["last_touch"] = today
+                if st.get("retrieved", 0) < 0.5:
+                    del self._chunks[key]
+            # pendings huerfanos (turnos sin respuesta) caducan en housekeeping
+            self._pending = {}
             self._save()
         except Exception:
             pass
