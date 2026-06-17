@@ -71,6 +71,8 @@ class ToolContext:
     set_listen_mode: Callable[..., dict] | None = None
     # Motor de proactividad (Fase 3). None si la feature está deshabilitada.
     proactivity: Any | None = None
+    # Curador de recuperaciones del RAG (KSI Fase 3). None si esta deshabilitado.
+    retrieval_curator: Any | None = None
 
 
 # =====================================================================
@@ -1252,10 +1254,23 @@ def _merge_context(model_ctx: str | None, auto_ctx: str) -> str | None:
 
 def _augmented_context(ctx: ToolContext, prompt: str, context_extra: str | None) -> str | None:
     try:
-        auto = build_project_context(ctx.vault, ctx.rag, prompt, semantic_memory=ctx.semantic_memory)
+        auto = build_project_context(
+            ctx.vault, ctx.rag, prompt,
+            semantic_memory=ctx.semantic_memory,
+            curator=ctx.retrieval_curator,
+        )
     except Exception:
         return context_extra  # fail-safe: nunca rompe el razonamiento
     return _merge_context(context_extra, auto.text)
+
+
+def _attribute_usage(ctx: ToolContext, prompt: str, response_text: str) -> None:
+    if ctx.retrieval_curator is None:
+        return
+    try:
+        ctx.retrieval_curator.attribute_usage(prompt, response_text)
+    except Exception:
+        pass  # jamas degrada la respuesta
 
 
 def ask_claude_deep(
@@ -1270,6 +1285,7 @@ def ask_claude_deep(
     max_tokens = max(128, min(int(max_tokens or 450), 2048))
     merged = _augmented_context(ctx, prompt, context_extra)
     r = ctx.reasoner.ask(prompt, context_extra=merged, max_tokens=max_tokens)
+    _attribute_usage(ctx, prompt, getattr(r, "text", "") or "")
     return _format_claude_response(ctx.reasoner.model, r)
 
 
@@ -1332,6 +1348,7 @@ async def ask_claude_deep_async(
     max_tokens = max(128, min(int(max_tokens or 450), 2048))
     merged = _augmented_context(ctx, prompt, context_extra)
     r = await ctx.reasoner.ask_async(prompt, context_extra=merged, max_tokens=max_tokens)
+    _attribute_usage(ctx, prompt, getattr(r, "text", "") or "")
     return _format_claude_response(ctx.reasoner.model, r)
 
 
