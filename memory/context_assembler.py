@@ -113,6 +113,9 @@ def build_project_context(
         rag_results = searcher.search(prompt, top_k=RAG_TOP_K)
         if curator is not None:
             rag_results = curator.rerank(rag_results)
+            # El pending que deja aqui SOLO lo resuelve ask_claude_deep via
+            # attribute_usage; otros call sites lo dejarian sin atribuir hasta que el
+            # housekeeping de cierre lo purgue. Hoy el unico llamador es el path profundo.
             curator.note_retrieval(prompt, rag_results)
     except Exception:
         rag_results = []

@@ -493,7 +493,6 @@ class Jarvis:
         try:
             _ksi_cfg = KnowledgeImproverConfig.from_env()
             if _ksi_cfg.rag_curation_enabled:
-                from memory.self_improvement.retrieval_curation import RetrievalCurator
                 self.retrieval_curator = RetrievalCurator(
                     config=_ksi_cfg,
                     embed_fn=lambda texts: self.rag._ensure_model().encode(
