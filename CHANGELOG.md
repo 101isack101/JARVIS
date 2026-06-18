@@ -6,6 +6,12 @@ Todas las versiones relevantes de JARVIS se documentan aqui.
 
 ### Added
 
+- KSI Fase 3 - RAG auto-curado: el curador (`RetrievalCurator`) mide el uso real
+  de cada chunk por el reasoner (atribucion por coseno respuesta<->chunk) y
+  re-rankea las recuperaciones futuras con un `quality_factor` lineal acotado a
+  [0.6, 1.4]. Autonomo y no destructivo (estado desechable en `data/rag_usage.json`,
+  nunca toca el indice FAISS). Housekeeping de decay + purga al cierre de sesion.
+  Gated por `JARVIS_RAG_CURATION`. Fail-safe en cada seam: jamas degrada la respuesta.
 - Auto-mejora recursiva de conocimiento (Fase 1): al cerrar sesión, JARVIS consolida
   sus Project Memory Cards de forma aditiva (recalcula confianza con decaimiento/refuerzo,
   detecta duplicados por coseno) y propone fusiones/contradicciones vía el morning
