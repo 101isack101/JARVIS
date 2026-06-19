@@ -69,12 +69,18 @@ def critique(reasoner, text: str, *, enabled: bool, budget) -> CritiqueResult:
 
 ### Responsabilidades
 
-- **`detect_vague`** — screening léxico puro. Marca vago un texto con muletillas
-  de imprecisión (*"algo", "varios", "creo", "más o menos", "etc.", "no estoy
-  seguro", "como que"*) **Y** ausencia de concreción (sin números, sin nombres
-  propios / rutas / identificadores, por debajo de un umbral de longitud). Cero
-  coste. La mayoría de los `jarvis_remember` ya son precisos → pasan sin tocar al
-  reasoner.
+- **`detect_vague`** — screening léxico puro, **bilingüe ES/EN** (las memorias de
+  Isaac mezclan ambos idiomas). Marca vago un texto con muletillas de imprecisión
+  **Y** ausencia de concreción (sin números, sin nombres propios / rutas /
+  identificadores, por debajo de un umbral de longitud). Cero coste. La mayoría de
+  los `jarvis_remember` ya son precisos → pasan sin tocar al reasoner.
+  - Léxico ES: *"algo", "varios", "creo", "más o menos", "etc.", "no estoy
+    seguro", "como que", "tal vez", "supongo", "cosas"*.
+  - Léxico EN: *"some", "a few", "several", "I think", "kind of", "sort of",
+    "maybe", "I guess", "stuff", "things", "not sure", "etc."*.
+  - El matching es por palabra/límite (no substring) y case-insensitive, en una
+    constante de módulo única que une ambos idiomas; se afina la lista exacta en
+    el plan/TDD.
 
 - **`refine`** — solo se invoca si `detect_vague` dio `True`. Una llamada
   presupuestada al reasoner que reescribe el bullet para que sea preciso,
@@ -173,9 +179,9 @@ Mínimo, porque F4 no necesita estado:
 
 Módulo testeable en aislamiento total con reasoner fake:
 
-- **`detect_vague`**: tabla de casos — vago real (muletillas + sin concreción) →
-  True; preciso (con número/nombre/ruta) → False; borde (corto pero concreto) →
-  False. Sin red.
+- **`detect_vague`**: tabla de casos **ES y EN** — vago real (muletillas +
+  sin concreción) → True en ambos idiomas; preciso (con número/nombre/ruta) →
+  False; borde (corto pero concreto) → False. Sin red.
 - **`refine`**: reasoner fake → JSON válido → texto + doubt correcto; JSON
   corrupto → self-heal; self-heal falla → original.
 - **`critique`** (fachada): enabled False → original sin llamar al fake; no-vago →
