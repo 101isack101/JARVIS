@@ -6,6 +6,11 @@ Todas las versiones relevantes de JARVIS se documentan aqui.
 
 ### Added
 
+- KSI Fase 4 - auto-critica en escritura: nuevo modulo `memory/self_improvement/write_critique.py`.
+  `jarvis_remember` refina de forma autonoma los `content` vagos antes de persistirlos
+  (deteccion determinista bilingue ES/EN + reasoner presupuestado con JSON self-heal).
+  Anexa el marcador `<!-- ksi-doubt:vague -->` cuando queda duda. Stateless y fail-safe.
+  Gated por `JARVIS_KSI_WRITE_CRITIQUE` (default OFF).
 - KSI Fase 3 - RAG auto-curado: el curador (`RetrievalCurator`) mide el uso real
   de cada chunk por el reasoner (atribucion por coseno respuesta<->chunk) y
   re-rankea las recuperaciones futuras con un `quality_factor` lineal acotado a
