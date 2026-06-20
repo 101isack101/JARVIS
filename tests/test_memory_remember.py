@@ -155,3 +155,68 @@ def test_project_memory_card_collects_project_updates(tmp_path):
     assert "## Pending" in card
     assert "retomar Polymath IDE" in card
     assert "- (pending)" not in card.split("## Pending", 1)[1].split("## Procedures", 1)[0]
+
+
+class FakeReasoner:
+    def __init__(self, text):
+        self._text = text
+        self.calls = 0
+
+    def ask(self, instructions, *, context_extra="", max_tokens=300):
+        self.calls += 1
+        return type("Resp", (), {"text": self._text})()
+
+
+def test_remember_refines_vague_content_when_enabled(tmp_path):
+    vault = ObsidianVault(tmp_path, read_all=True)
+    rag = FakeRAG()
+    reasoner = FakeReasoner('{"text": "Isaac prefiere notas granulares por proyecto", "doubt": false}')
+    ctx = ToolContext(vault=vault, rag=rag, reasoner=reasoner, write_critique_enabled=True)
+
+    jarvis_remember(
+        ctx,
+        title="Preferencia notas",
+        content="Isaac quiere algo más granular, no estoy seguro de cómo",
+        tags=["preference"],
+    )
+
+    note = read_note(vault, vault.memory_path / "Preferencia notas.md")
+    assert "Isaac prefiere notas granulares por proyecto" in note.body
+    assert "algo más granular" not in note.body
+    assert reasoner.calls == 1
+
+
+def test_remember_doubt_appends_marker(tmp_path):
+    vault = ObsidianVault(tmp_path, read_all=True)
+    rag = FakeRAG()
+    reasoner = FakeReasoner('{"text": "Isaac mencionó un cambio pendiente sin detallar", "doubt": true}')
+    ctx = ToolContext(vault=vault, rag=rag, reasoner=reasoner, write_critique_enabled=True)
+
+    jarvis_remember(
+        ctx,
+        title="Cambio pendiente",
+        content="hay que cambiar algo, no estoy seguro qué",
+        tags=["todo"],
+    )
+
+    text = (vault.memory_path / "Cambio pendiente.md").read_text(encoding="utf-8")
+    assert "<!-- ksi-doubt:vague -->" in text
+
+
+def test_remember_disabled_leaves_content_untouched(tmp_path):
+    vault = ObsidianVault(tmp_path, read_all=True)
+    rag = FakeRAG()
+    reasoner = FakeReasoner('{"text": "NO DEBERIA USARSE", "doubt": false}')
+    ctx = ToolContext(vault=vault, rag=rag, reasoner=reasoner)  # flag default False
+
+    jarvis_remember(
+        ctx,
+        title="Preferencia notas",
+        content="Isaac quiere algo más granular, no estoy seguro de cómo",
+        tags=["preference"],
+    )
+
+    note = read_note(vault, vault.memory_path / "Preferencia notas.md")
+    assert "Isaac quiere algo más granular" in note.body
+    assert "NO DEBERIA USARSE" not in note.body
+    assert reasoner.calls == 0

@@ -35,6 +35,7 @@ from . import notes as notes_mod
 from .context_assembler import build_project_context
 from .obsidian_vault import ObsidianVault, VaultError
 from .rag import VaultRAG
+from .self_improvement import write_critique
 from .session_summary import search_session_summaries
 from .triage import triage_memory, update_project_memory_card
 
@@ -73,6 +74,8 @@ class ToolContext:
     proactivity: Any | None = None
     # Curador de recuperaciones del RAG (KSI Fase 3). None si esta deshabilitado.
     retrieval_curator: Any | None = None
+    # Auto-crítica en escritura (KSI Fase 4): refina content vago antes de guardar.
+    write_critique_enabled: bool = False
 
 
 # =====================================================================
@@ -1080,6 +1083,12 @@ def jarvis_remember(
             "reason": triage.reason,
             "tags": triage.tags,
         }
+
+    # KSI Fase 4: refina content vago una vez; fluye a nota nueva, append y card.
+    _crit = write_critique.critique(ctx.reasoner, content, enabled=ctx.write_critique_enabled)
+    content = _crit.text
+    if _crit.doubt and "<!-- ksi-doubt:vague -->" not in content:
+        content = content.rstrip() + "\n\n<!-- ksi-doubt:vague -->\n"
 
     path = ctx.vault.memory_file(title)
     frontmatter = {
