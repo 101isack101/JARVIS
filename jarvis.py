@@ -563,6 +563,7 @@ class Jarvis:
             set_listen_mode=self._apply_listen_mode,
             proactivity=self.proactivity,
             retrieval_curator=self.retrieval_curator,
+            write_critique_enabled=KnowledgeImproverConfig.from_env().write_critique_enabled,
         )
         self.dispatcher = ToolDispatcher(self.tool_ctx)
         self.indexer = IncrementalIndexer(
