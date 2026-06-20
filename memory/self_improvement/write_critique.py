@@ -53,3 +53,65 @@ def detect_vague(text: str) -> bool:
     if _CONCRETE_RE.search(t):
         return False
     return True
+
+
+_INSTRUCTIONS = (
+    "Eres el bibliotecario de JARVIS. Te paso una memoria que un detector marcó "
+    "como VAGA o imprecisa. Reescríbela para que sea precisa y concreta, "
+    "conservando SOLO la información presente. PROHIBIDO inventar datos, nombres, "
+    "números o fechas que no estén en el texto. Si no puedes concretarla por falta "
+    "de información objetiva, devuélvela lo más clara posible y marca doubt=true. "
+    'Responde SOLO un objeto JSON: {"text": "<memoria reescrita>", "doubt": true|false}.'
+)
+
+
+def _extract_json(text: str) -> dict | None:
+    """Primer objeto JSON balanceado dentro del texto (self-heal básico).
+
+    Espeja memory/self_improvement/judge.py para mantener el módulo aislado.
+    """
+    s = text or ""
+    start = s.find("{")
+    while start != -1:
+        depth = 0
+        for i in range(start, len(s)):
+            if s[i] == "{":
+                depth += 1
+            elif s[i] == "}":
+                depth -= 1
+                if depth == 0:
+                    try:
+                        return json.loads(s[start : i + 1])
+                    except json.JSONDecodeError:
+                        break
+        start = s.find("{", start + 1)
+    return None
+
+
+def refine(reasoner, text: str, *, max_tokens: int = 300) -> CritiqueResult:
+    """Pide al reasoner reescribir `text`. SOLO se llama sobre texto vago."""
+    if reasoner is None:
+        return CritiqueResult(text=text, doubt=False)
+    try:
+        resp = reasoner.ask(_INSTRUCTIONS, context_extra="MEMORIA:\n" + text, max_tokens=max_tokens)
+        data = _extract_json(getattr(resp, "text", "") or "")
+    except Exception:
+        return CritiqueResult(text=text, doubt=False)
+    if not isinstance(data, dict) or "text" not in data:
+        return CritiqueResult(text=text, doubt=False)
+    refined = str(data.get("text") or "").strip()
+    if not refined:
+        return CritiqueResult(text=text, doubt=False)
+    return CritiqueResult(text=refined, doubt=bool(data.get("doubt")))
+
+
+def critique(reasoner, text: str, *, enabled: bool, max_tokens: int = 300) -> CritiqueResult:
+    """Fachada fail-safe — único punto de entrada para jarvis_remember."""
+    try:
+        if not enabled:
+            return CritiqueResult(text=text, doubt=False)
+        if not detect_vague(text):
+            return CritiqueResult(text=text, doubt=False)
+        return refine(reasoner, text, max_tokens=max_tokens)
+    except Exception:
+        return CritiqueResult(text=text, doubt=False)
