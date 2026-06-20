@@ -40,3 +40,10 @@ def test_gap_config_defaults_and_env():
     })
     assert cfg2.min_card_bullets == 6
     assert cfg2.stale_confidence == 0.25
+
+
+def test_write_critique_config_defaults_off_and_env():
+    cfg = KnowledgeImproverConfig()
+    assert cfg.write_critique_enabled is False
+    cfg2 = KnowledgeImproverConfig.from_env({"JARVIS_KSI_WRITE_CRITIQUE": "true"})
+    assert cfg2.write_critique_enabled is True

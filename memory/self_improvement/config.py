@@ -28,6 +28,7 @@ class KnowledgeImproverConfig:
     factor_floor: float = 0.6           # multiplicador minimo del score en rerank
     factor_ceil: float = 1.4            # multiplicador maximo del score en rerank
     usage_decay_days: int = 45          # vida media para decaer cuentas en housekeeping
+    write_critique_enabled: bool = False  # auto-crítica en escritura (gate JARVIS_KSI_WRITE_CRITIQUE)
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> "KnowledgeImproverConfig":
@@ -66,4 +67,5 @@ class KnowledgeImproverConfig:
             factor_floor=_float("JARVIS_KSI_FACTOR_FLOOR", d.factor_floor),
             factor_ceil=_float("JARVIS_KSI_FACTOR_CEIL", d.factor_ceil),
             usage_decay_days=_int("JARVIS_KSI_USAGE_DECAY_DAYS", d.usage_decay_days),
+            write_critique_enabled=_bool("JARVIS_KSI_WRITE_CRITIQUE", d.write_critique_enabled),
         )
