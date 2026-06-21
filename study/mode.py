@@ -51,6 +51,9 @@ class StudyModeController:
         self._thread: threading.Thread | None = None
         self._paused = False
         self._continuous = False
+        self._flush_thread: threading.Thread | None = None
+        self._flush_status: dict = {"running": False}
+        self._last_flush_result: dict | None = None
 
     def start(
         self,
@@ -133,11 +136,12 @@ class StudyModeController:
     def status(self) -> dict:
         with self._lock:
             if self._ledger is None:
-                return {"active": False}
+                return {"active": False, "flush": dict(self._flush_status)}
             return {
                 "active": True,
                 "paused": self._paused,
                 "continuous": self._continuous,
+                "flush": dict(self._flush_status),
                 **self._ledger.status(),
             }
 
@@ -213,6 +217,64 @@ class StudyModeController:
         if not pending:
             return {"ok": True, "flushed": False, "message": "No habia evidencia nueva."}
 
+        result = self._flush_snapshot(ledger, note_abs, pending, intent)
+        with self._lock:
+            ledger.mark_flushed(pending)
+        return result
+
+    def flush_background(self, *, intent: str = "study_notes") -> dict:
+        with self._lock:
+            if self._ledger is None or self._note_abs_path is None:
+                return {"ok": False, "error": "Study Mode no esta activo"}
+            pending = self._ledger.pending()
+            if not pending:
+                return {"ok": True, "flushed": False, "message": "No habia evidencia nueva."}
+            return self._start_flush_worker(
+                ledger=self._ledger,
+                note_abs=self._note_abs_path,
+                pending=pending,
+                intent=intent,
+                mark_current=True,
+            )
+
+    def stop_background(self, *, intent: str = "study_notes") -> dict:
+        with self._lock:
+            if self._ledger is None:
+                return {"ok": False, "error": "Study Mode no esta activo"}
+            ledger = self._ledger
+            note_abs = self._note_abs_path
+            pending = ledger.pending() if note_abs is not None else []
+            final_status = self.status()
+
+        self._stop_event.set()
+        if self._thread:
+            self._thread.join(timeout=2.0)
+
+        flush_result = {"ok": True, "flushed": False, "message": "No habia evidencia nueva."}
+        if note_abs is not None and pending:
+            flush_result = self._start_flush_worker(
+                ledger=ledger,
+                note_abs=note_abs,
+                pending=pending,
+                intent=intent,
+                mark_current=False,
+            )
+
+        with self._lock:
+            self._ledger = None
+            self._note_abs_path = None
+            self._thread = None
+            self._paused = False
+            self._continuous = False
+
+        return {
+            "ok": True,
+            "message": "Study Mode terminado; guardado pesado en segundo plano.",
+            "flush": flush_result,
+            "final_status": final_status,
+        }
+
+    def _flush_snapshot(self, ledger: StudyLedger, note_abs, pending: list[Evidence], intent: str) -> dict:
         synthesis = self.synthesizer.synthesize(
             session_title=ledger.title,
             evidence=pending,
@@ -223,14 +285,75 @@ class StudyModeController:
             synthesis.markdown,
             section_title="Jarvis Study Synthesis",
         )
-        with self._lock:
-            ledger.mark_flushed(pending)
         return {
             "ok": True,
             "flushed": True,
             "evidence_count": synthesis.evidence_count,
             "used_reasoner": synthesis.used_reasoner,
             "write": write_result,
+        }
+
+    def _start_flush_worker(
+        self,
+        *,
+        ledger: StudyLedger,
+        note_abs,
+        pending: list[Evidence],
+        intent: str,
+        mark_current: bool,
+    ) -> dict:
+        with self._lock:
+            if self._flush_thread is not None and self._flush_thread.is_alive():
+                return {
+                    "ok": True,
+                    "background": True,
+                    "running": True,
+                    "message": "Ya hay un guardado de Study Mode en progreso.",
+                    "status": dict(self._flush_status),
+                }
+            self._flush_status = {
+                "running": True,
+                "intent": intent,
+                "evidence_count": len(pending),
+                "started_at": time.time(),
+            }
+
+        def _worker() -> None:
+            try:
+                result = self._flush_snapshot(ledger, note_abs, pending, intent)
+                if mark_current:
+                    with self._lock:
+                        if self._ledger is ledger:
+                            ledger.mark_flushed(pending)
+            except Exception as exc:
+                result = {
+                    "ok": False,
+                    "flushed": False,
+                    "error": f"{type(exc).__name__}: {exc}",
+                    "evidence_count": len(pending),
+                }
+            with self._lock:
+                self._last_flush_result = result
+                self._flush_status = {
+                    "running": False,
+                    "last_ok": bool(result.get("ok")),
+                    "evidence_count": result.get("evidence_count", len(pending)),
+                    "finished_at": time.time(),
+                }
+
+        self._flush_thread = threading.Thread(
+            target=_worker,
+            name="JarvisStudyFlush",
+            daemon=True,
+        )
+        self._flush_thread.start()
+        return {
+            "ok": True,
+            "background": True,
+            "running": True,
+            "flushed": "pending",
+            "evidence_count": len(pending),
+            "message": "Guardado de Study Mode iniciado en segundo plano.",
         }
 
     def _observer_loop(self) -> None:

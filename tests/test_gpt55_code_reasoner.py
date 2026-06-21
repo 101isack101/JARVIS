@@ -44,3 +44,17 @@ def test_gpt55_code_reasoner_uses_responses_api_and_model():
     assert result.text == "plan de codigo"
     assert result.input_tokens == 12
     assert result.output_tokens == 34
+
+
+def test_gpt55_warmup_accepts_injected_client_without_api_key():
+    client = FakeClient()
+    reasoner = GPT55CodeReasoner(
+        model="gpt-5.5",
+        client=client,
+        api_key=None,
+        tracker=None,
+    )
+
+    reasoner.warmup()
+
+    assert reasoner.client is client

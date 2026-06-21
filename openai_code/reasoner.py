@@ -166,6 +166,14 @@ class GPT55CodeReasoner:
         self.async_client = AsyncOpenAI(api_key=self.api_key, timeout=self.timeout_s)
         return self.async_client
 
+    def warmup(self) -> None:
+        """Importa y construye clientes sin hacer requests de red."""
+        if not self.configured:
+            return
+        self._ensure_client()
+        if self.api_key or getattr(self, "async_client", None) is not None:
+            self._ensure_async_client()
+
     @staticmethod
     def _extract_text(response: Any) -> str:
         direct = getattr(response, "output_text", None)

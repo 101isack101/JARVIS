@@ -14,6 +14,8 @@ from memory.session_journal import SessionJournal
 SESSIONS_SUBDIR = "sessions"
 DEFAULT_RECENT_LIMIT = 5
 DEFAULT_SESSION_MAX_CHARS = 900
+DEFAULT_CURRENT_SESSION_TURNS = 10
+DEFAULT_CURRENT_SESSION_MAX_CHARS = 4500
 
 _SYNTHESIS_INSTRUCTIONS = (
     "Eres el cronista de JARVIS. Te paso el transcript crudo de una sesion de voz "
@@ -38,6 +40,121 @@ def _format_transcript(turns: list[dict]) -> str:
         if jarvis:
             lines.append(f"JARVIS: {jarvis}")
     return "\n".join(lines)
+
+
+def _format_turn_for_recall(turn: dict) -> str:
+    user = (turn.get("user") or "").strip()
+    jarvis = (turn.get("jarvis") or "").strip()
+    parts: list[str] = []
+    if user:
+        parts.append(f"Isaac: {user}")
+    if jarvis:
+        parts.append(f"JARVIS: {jarvis}")
+    return "\n".join(parts)
+
+
+def _limit_text(text: str, max_chars: int) -> str:
+    max_chars = max(200, int(max_chars or DEFAULT_CURRENT_SESSION_MAX_CHARS))
+    if len(text) <= max_chars:
+        return text
+    return text[: max_chars - 24].rstrip() + "\n...[truncated]"
+
+
+def _score_turn_for_query(turn: dict, terms: list[str]) -> int:
+    if not terms:
+        return 0
+    haystack = f"{turn.get('user', '')}\n{turn.get('jarvis', '')}".lower()
+    return sum(1 for term in terms if term in haystack)
+
+
+def current_session_recall(
+    journal: SessionJournal,
+    query: str = "",
+    limit: int = DEFAULT_CURRENT_SESSION_TURNS,
+    max_chars: int = DEFAULT_CURRENT_SESSION_MAX_CHARS,
+) -> dict:
+    """Recall over the still-open session journal.
+
+    This is intentionally cheap and deterministic. It covers the gap where
+    Gemini Live reconnects or compresses context before the session has been
+    synthesized into a durable session note.
+    """
+    turns = journal.read_turns()
+    limit = max(1, min(int(limit or DEFAULT_CURRENT_SESSION_TURNS), 20))
+    max_chars = max(200, min(int(max_chars or DEFAULT_CURRENT_SESSION_MAX_CHARS), 12000))
+    terms = _normalize_query(query)
+
+    indexed = list(enumerate(turns))
+    if terms:
+        ranked = [
+            (idx, turn, _score_turn_for_query(turn, terms))
+            for idx, turn in indexed
+        ]
+        matches = [(idx, turn) for idx, turn, score in ranked if score > 0]
+        tail = indexed[-min(3, limit):]
+        merged: dict[int, dict] = {idx: turn for idx, turn in matches[-limit:]}
+        merged.update({idx: turn for idx, turn in tail})
+        selected = sorted(merged.items())[-limit:]
+    else:
+        selected = indexed[-limit:]
+
+    if not selected and turns:
+        selected = indexed[-limit:]
+
+    chunks: list[str] = []
+    payload_turns: list[dict] = []
+    for idx, turn in selected:
+        text = _format_turn_for_recall(turn)
+        if not text:
+            continue
+        payload_turns.append(
+            {
+                "turn_index": idx,
+                "ts": turn.get("ts"),
+                "user": turn.get("user") or "",
+                "jarvis": turn.get("jarvis") or "",
+            }
+        )
+        chunks.append(f"### Turno {idx + 1}\n{text}")
+
+    summary = _limit_text("\n\n".join(chunks).strip(), max_chars) if chunks else ""
+    latest = turns[-1] if turns else {}
+    return {
+        "query": query or "",
+        "found": len(payload_turns),
+        "total_turns": len(turns),
+        "source": "current_session_journal",
+        "summary": summary,
+        "turns": payload_turns,
+        "latest_user": latest.get("user") or "",
+        "latest_jarvis": latest.get("jarvis") or "",
+    }
+
+
+def build_current_session_block(
+    journal: SessionJournal,
+    *,
+    limit: int = DEFAULT_CURRENT_SESSION_TURNS,
+    max_chars: int = DEFAULT_CURRENT_SESSION_MAX_CHARS,
+) -> str:
+    """Build a compact live-session block for reconnect/system prompt restore."""
+    recall = current_session_recall(
+        journal,
+        query="",
+        limit=limit,
+        max_chars=max_chars,
+    )
+    if not recall["summary"]:
+        return ""
+    bar = "=" * 11
+    return (
+        f"{bar} CONTEXTO VIVO DE ESTA SESION {bar}\n"
+        f"{recall['summary']}\n"
+        f"{bar}{bar}\n"
+        "Este bloque restaura continuidad tras reconexion/compresion. "
+        "Si Isaac dice 'lo que veniamos hablando', 'lo que te dije' o "
+        "'hace rato', prioriza este contexto antes de memorias de ayer."
+    )
 
 
 def synthesize_and_save(

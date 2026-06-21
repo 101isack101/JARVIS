@@ -53,6 +53,7 @@ from memory.rag import VaultRAG
 from memory.semantic import SemanticMemoryIndex, SourceRegistry
 from memory.session_journal import SessionJournal
 from memory.session_summary import (
+    build_current_session_block,
     synthesize_and_save,
     load_last_summary,
     load_recent_summaries,
@@ -564,6 +565,7 @@ class Jarvis:
             proactivity=self.proactivity,
             retrieval_curator=self.retrieval_curator,
             write_critique_enabled=KnowledgeImproverConfig.from_env().write_critique_enabled,
+            session_journal=self.session_journal,
         )
         self.dispatcher = ToolDispatcher(self.tool_ctx)
         self.indexer = IncrementalIndexer(
@@ -661,6 +663,7 @@ class Jarvis:
                 context_target_tokens=int(
                     os.environ.get("JARVIS_CONTEXT_TARGET_TOKENS", "12800")
                 ),
+                dynamic_context_provider=self._live_session_context_block,
             ),
             callbacks=session_callbacks,
         )
@@ -1519,6 +1522,25 @@ class Jarvis:
                 f"[WARN] wake-word no disponible ({type(exc).__name__}: {exc}); "
                 "barge-in desactivado. Instala: pip install openwakeword"
             )
+
+    def _live_session_context_block(self) -> str:
+        """Contexto volatil para reconexiones de Gemini Live.
+
+        La memoria sintetizada de sesion se escribe al cierre. En sesiones largas,
+        Live puede reconectar antes de ese cierre; este bloque reinyecta los
+        turnos recientes ya persistidos en el journal append-only.
+        """
+        if not self.session_continuity_enabled:
+            return ""
+        try:
+            return build_current_session_block(
+                self.session_journal,
+                limit=int(os.environ.get("JARVIS_CURRENT_SESSION_RECALL_TURNS", "10")),
+                max_chars=int(os.environ.get("JARVIS_CURRENT_SESSION_RECALL_CHARS", "4500")),
+            )
+        except Exception as exc:
+            self._log(f"[WARN] contexto vivo de sesion omitido: {exc}")
+            return ""
 
     def _save_session_memory(self) -> None:
         """Cierre limpio: sintetiza el journal en una nota-diario fechada.

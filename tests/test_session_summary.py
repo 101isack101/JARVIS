@@ -13,7 +13,9 @@ from memory.obsidian_vault import ObsidianVault
 from memory.session_journal import SessionJournal
 from memory.session_summary import (
     SESSIONS_SUBDIR,
+    build_current_session_block,
     build_recent_recall_block,
+    current_session_recall,
     load_recent_summaries,
     search_session_summaries,
     synthesize_and_save,
@@ -149,6 +151,31 @@ def test_load_recent_summaries_returns_compact_session_map(temp_vault):
     assert "hoy" in block
     assert "ayer" in block
     assert "viejo" not in block
+
+
+def test_current_session_recall_reads_pending_live_journal(tmp_path):
+    journal = SessionJournal(tmp_path / "journal.jsonl")
+    journal.append_turn("Estamos viendo LangGraph y LangChain", "Activo Study Mode.")
+    journal.append_turn("No, de lo que veniamos hablando", "Repasamos Reflection Agents.")
+
+    result = current_session_recall(journal, query="LangGraph", limit=5)
+
+    assert result["source"] == "current_session_journal"
+    assert result["found"] >= 1
+    assert result["total_turns"] == 2
+    assert "LangGraph" in result["summary"]
+    assert "Reflection Agents" in result["summary"]
+
+
+def test_current_session_block_prioritizes_live_context(tmp_path):
+    journal = SessionJournal(tmp_path / "journal.jsonl")
+    journal.append_turn("Documenta el curso de LangGraph", "Study Mode activo.")
+
+    block = build_current_session_block(journal, limit=3, max_chars=1000)
+
+    assert "CONTEXTO VIVO DE ESTA SESION" in block
+    assert "Documenta el curso de LangGraph" in block
+    assert "memorias de ayer" in block
 
 
 def test_search_session_summaries_understands_ayer(temp_vault):

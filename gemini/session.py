@@ -29,6 +29,10 @@ from vision.prompts import visual_capture_prompt
 DEFAULT_MODEL = "gemini-3.1-flash-live-preview"
 INPUT_MIME_PCM_16K = "audio/pcm;rate=16000"
 DEFAULT_TOOL_TIMEOUT_S = 12.0
+LONG_TOOL_TOKEN_THRESHOLDS: dict[str, tuple[str, int]] = {
+    "ask_gpt55_code": ("max_output_tokens", 1200),
+    "ask_claude_deep": ("max_tokens", 600),
+}
 
 # Modelo virtual para reportar tokens al tracker (granularidad por kind)
 def _gemini_model_key(model: str, kind: str) -> str:
@@ -61,6 +65,17 @@ def _safe_tool_args_for_log(args: dict, max_chars: int = 240) -> dict:
         else:
             safe[key] = value
     return safe
+
+
+def _is_long_tool_request(name: str, args: dict) -> bool:
+    threshold = LONG_TOOL_TOKEN_THRESHOLDS.get(name)
+    if threshold is None:
+        return False
+    key, min_value = threshold
+    try:
+        return int(args.get(key) or 0) >= min_value
+    except (TypeError, ValueError):
+        return False
 
 
 def _call_compatible(callback: Callable, *args) -> None:
@@ -133,6 +148,9 @@ class SessionConfig:
     # mas margen a Claude sin alargar el resto. Si la tool no esta listada
     # cae en `tool_timeout_s`.
     tool_timeouts_s: dict[str, float] = field(default_factory=dict)
+    # Timeout extendido para llamadas explicitamente largas. Se activa cuando
+    # el modelo pide muchos tokens (ej. informes largos con contexto).
+    tool_long_timeouts_s: dict[str, float] = field(default_factory=dict)
     # Context window compression: ventana deslizante que comprime turnos viejos
     # cuando el contexto se acerca al limite, para que sesiones LARGAS no se
     # saturen (sintoma: respuestas lentisimas y "empieza de cero" al truncar).
@@ -140,6 +158,9 @@ class SessionConfig:
     context_compression: bool = True
     context_trigger_tokens: int = 25600
     context_target_tokens: int = 12800
+    # Called on every Live connection/reconnection to append volatile context
+    # that is not safe to rely on Gemini preserving internally.
+    dynamic_context_provider: Callable[[], str] | None = None
 
 
 class JarvisSession:
@@ -302,11 +323,13 @@ class JarvisSession:
         # reconexion. Pasa el handle si lo tenemos para retomar contexto.
         resumption = types.SessionResumptionConfig(handle=self._resumption_handle)
 
+        system_prompt = self._system_prompt_for_connect()
+
         live_cfg_kwargs = dict(
             response_modalities=["AUDIO"],
             speech_config=speech_config,
             system_instruction=types.Content(
-                parts=[types.Part(text=self.config.system_prompt)]
+                parts=[types.Part(text=system_prompt)]
             ),
             realtime_input_config=realtime_cfg,
             session_resumption=resumption,
@@ -360,6 +383,21 @@ class JarvisSession:
             self.cb.on_connection_status("error", f"{type(exc).__name__}: {exc}")
             self.cb.on_error(exc)
             self._session = None
+
+    def _system_prompt_for_connect(self) -> str:
+        prompt = self.config.system_prompt
+        provider = self.config.dynamic_context_provider
+        if provider is None:
+            return prompt
+        try:
+            dynamic = (provider() or "").strip()
+        except Exception as exc:
+            self.cb.on_log(f"[WARN] dynamic_context_provider fallo: {type(exc).__name__}: {exc}")
+            return prompt
+        if not dynamic:
+            return prompt
+        self.cb.on_log(f"contexto vivo inyectado al reconectar ({len(dynamic)} chars)")
+        return prompt.rstrip() + "\n\n" + dynamic
 
     async def _receive_loop(self) -> None:
         """Lee del WS continuamente y dispara callbacks con logging completo.
@@ -582,6 +620,11 @@ class JarvisSession:
             name = fc.name
             args = dict(fc.args) if fc.args else {}
             timeout = self.config.tool_timeouts_s.get(name, self.config.tool_timeout_s)
+            if _is_long_tool_request(name, args):
+                timeout = max(
+                    timeout,
+                    self.config.tool_long_timeouts_s.get(name, timeout),
+                )
             self.cb.on_log(f"tool_call: {name}({_safe_tool_args_for_log(args)}) [timeout={timeout:.0f}s]")
             try:
                 _call_compatible(self.cb.on_tool_start, name, args)

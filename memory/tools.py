@@ -4,6 +4,7 @@ memory/tools.py - Tools de memoria expuestas a Gemini Live como functions.
 Jarvis decide AUTONOMAMENTE cuando llamarlas:
   - jarvis_recall(query, top_k)             -> antes de responder, si necesita contexto
   - jarvis_session_recall(query, when)      -> continuidad temporal entre sesiones
+  - jarvis_current_session_recall(query)    -> continuidad viva dentro de esta sesion
   - jarvis_remember(title, content, tags)   -> despues de un turno con info durable
   - jarvis_browse(folder, limit)            -> cuando le piden 'que hay sobre X'
   - jarvis_link(note_from, note_to)         -> cuando descubre relacion entre notas
@@ -36,6 +37,7 @@ from .context_assembler import build_project_context
 from .obsidian_vault import ObsidianVault, VaultError
 from .rag import VaultRAG
 from .self_improvement import write_critique
+from .session_summary import current_session_recall as recall_current_session
 from .session_summary import search_session_summaries
 from .triage import triage_memory, update_project_memory_card
 
@@ -76,6 +78,9 @@ class ToolContext:
     retrieval_curator: Any | None = None
     # Auto-crítica en escritura (KSI Fase 4): refina content vago antes de guardar.
     write_critique_enabled: bool = False
+    # Journal vivo de la sesion actual para recuperar continuidad tras
+    # reconexiones o compresion de contexto de Gemini Live.
+    session_journal: Any | None = None
 
 
 # =====================================================================
@@ -131,6 +136,31 @@ JARVIS_SESSION_RECALL_DECL = types.FunctionDeclaration(
             "limit": types.Schema(
                 type=types.Type.INTEGER,
                 description="Cantidad maxima de sesiones a devolver. Default 5, max 10.",
+            ),
+        },
+    ),
+)
+
+JARVIS_CURRENT_SESSION_RECALL_DECL = types.FunctionDeclaration(
+    name="jarvis_current_session_recall",
+    description=(
+        "Recupera turnos de ESTA sesion viva todavia no sintetizada. USALA antes "
+        "de responder cuando Isaac diga 'lo que veniamos hablando', 'lo que te "
+        "dije', 'hace rato', 'ahorita', 'lo anterior', 'sigamos', o cuando "
+        "parezca que perdiste el hilo tras una reconexion/compresion. Prioriza "
+        "esta tool sobre jarvis_session_recall si la referencia es al contexto "
+        "actual y no a ayer/otra sesion."
+    ),
+    parameters=types.Schema(
+        type=types.Type.OBJECT,
+        properties={
+            "query": types.Schema(
+                type=types.Type.STRING,
+                description="Tema o frase a buscar dentro de la conversacion actual.",
+            ),
+            "limit": types.Schema(
+                type=types.Type.INTEGER,
+                description="Cantidad maxima de turnos vivos a devolver. Default 10, max 20.",
             ),
         },
     ),
@@ -407,7 +437,9 @@ STUDY_MODE_DECL = types.FunctionDeclaration(
         "'pausa study mode', 'termina study mode', 'haz flush de los apuntes' o "
         "'cual es el estado del modo estudio'. En start crea una sesion explicita; "
         "capture_page agrega la pagina actual; flush_now sintetiza y escribe en "
-        "Obsidian; stop hace flush y termina."
+        "Obsidian; stop hace flush y termina. Si flush_now/stop devuelven "
+        "background=true, di que el guardado empezo en segundo plano y usa "
+        "status para confirmar antes de decir que ya termino."
     ),
     parameters=types.Schema(
         type=types.Type.OBJECT,
@@ -938,6 +970,7 @@ def all_function_declarations() -> list[types.FunctionDeclaration]:
     return [
         JARVIS_RECALL_DECL,
         JARVIS_SESSION_RECALL_DECL,
+        JARVIS_CURRENT_SESSION_RECALL_DECL,
         JARVIS_REMEMBER_DECL,
         JARVIS_BROWSE_DECL,
         JARVIS_LINK_DECL,
@@ -1011,6 +1044,29 @@ def jarvis_session_recall(
         ctx.vault,
         query=query or "",
         when=when or "",
+        limit=limit,
+    )
+
+
+def jarvis_current_session_recall(
+    ctx: ToolContext,
+    query: str = "",
+    limit: int = 10,
+) -> dict:
+    """Cheap recall over turns already recorded in the current live session."""
+    if ctx.session_journal is None:
+        return {
+            "query": query or "",
+            "found": 0,
+            "total_turns": 0,
+            "source": "current_session_journal",
+            "summary": "",
+            "turns": [],
+            "error": "current session journal unavailable",
+        }
+    return recall_current_session(
+        ctx.session_journal,
+        query=query or "",
         limit=limit,
     )
 
@@ -1523,6 +1579,14 @@ def _get_obs_memory_controller(ctx: ToolContext):
     return _OBS_MEMORY_CONTROLLER
 
 
+def _study_background_flush_enabled() -> bool:
+    return os.environ.get("JARVIS_STUDY_BACKGROUND_FLUSH", "true").lower() in (
+        "true",
+        "1",
+        "yes",
+    )
+
+
 def study_mode(
     ctx: ToolContext,
     action: str,
@@ -1579,6 +1643,8 @@ def study_mode(
         )
         if approval is not None:
             return approval
+        if _study_background_flush_enabled():
+            return controller.stop_background(intent=intent or "study_notes")
         return controller.stop(flush=True)
     if op == "status":
         return {"ok": True, **controller.status()}
@@ -1595,6 +1661,8 @@ def study_mode(
         )
         if approval is not None:
             return approval
+        if _study_background_flush_enabled():
+            return controller.flush_background(intent=intent or "study_notes")
         return controller.flush_now(intent=intent or "study_notes")
     return {
         "ok": False,
@@ -2404,6 +2472,7 @@ class ToolDispatcher:
         self._tools: dict[str, Callable[..., dict | ToolResult]] = {
             "jarvis_recall": lambda **kw: jarvis_recall(ctx, **kw),
             "jarvis_session_recall": lambda **kw: jarvis_session_recall(ctx, **kw),
+            "jarvis_current_session_recall": lambda **kw: jarvis_current_session_recall(ctx, **kw),
             "jarvis_remember": lambda **kw: jarvis_remember(ctx, **kw),
             "jarvis_browse": lambda **kw: jarvis_browse(ctx, **kw),
             "jarvis_link": lambda **kw: jarvis_link(ctx, **kw),

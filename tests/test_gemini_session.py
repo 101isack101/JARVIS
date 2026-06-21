@@ -164,3 +164,39 @@ def test_tool_callbacks_remain_backward_compatible():
         ("start", "jarvis_recall"),
         ("end", "jarvis_recall", 12.5, True),
     ]
+
+
+def test_system_prompt_appends_dynamic_context_provider():
+    logs = []
+    session = JarvisSession(
+        SessionConfig(
+            api_key="test-key",
+            system_prompt="BASE",
+            dynamic_context_provider=lambda: "LIVE CONTEXT",
+        ),
+        SessionCallbacks(on_log=logs.append),
+    )
+
+    prompt = session._system_prompt_for_connect()
+
+    assert prompt == "BASE\n\nLIVE CONTEXT"
+    assert any("contexto vivo inyectado" in line for line in logs)
+
+
+def test_system_prompt_ignores_failing_dynamic_context_provider():
+    logs = []
+
+    def boom():
+        raise RuntimeError("no journal")
+
+    session = JarvisSession(
+        SessionConfig(
+            api_key="test-key",
+            system_prompt="BASE",
+            dynamic_context_provider=boom,
+        ),
+        SessionCallbacks(on_log=logs.append),
+    )
+
+    assert session._system_prompt_for_connect() == "BASE"
+    assert any("dynamic_context_provider fallo" in line for line in logs)

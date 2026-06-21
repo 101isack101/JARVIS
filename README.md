@@ -65,6 +65,8 @@ Edita `.env` y rellena:
 - **`ANTHROPIC_API_KEY`** — ya tienes una en `Interview_Copilot\.env`, copiala
 - **`OPENAI_API_KEY`** — habilita `ask_gpt55_code`
 - **`JARVIS_AGENTIC_CODE_MODEL`** — default `gpt-5.5`; cambia este valor si tu cuenta usa otro slug de modelo
+- **`JARVIS_OPENAI_TIMEOUT_S`**, **`JARVIS_ASK_GPT55_TIMEOUT_S`**, **`JARVIS_ASK_CLAUDE_TIMEOUT_S`** — caps de latencia para delegaciones normales. Defaults pensados para voz en vivo.
+- **`JARVIS_ASK_GPT55_LONG_TIMEOUT_S`**, **`JARVIS_ASK_CLAUDE_LONG_TIMEOUT_S`** — caps automaticos para informes largos cuando la tool pide muchos tokens.
 
 > **Importante:** `.env` debe ser UTF-8 **sin BOM**. NO uses `Set-Content -Encoding utf8` (añade BOM). Usar:
 > ```powershell
