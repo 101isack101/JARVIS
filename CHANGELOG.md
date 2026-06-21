@@ -2,10 +2,21 @@
 
 Todas las versiones relevantes de JARVIS se documentan aqui.
 
-## Unreleased
+## 1.04 - 2026-06-19
 
 ### Added
 
+- Recall de la sesion EN CURSO: `jarvis_current_session_recall` + `build_current_session_block`
+  (`memory/session_summary.py`) leen el journal append-only de la sesion abierta. Cubren el hueco
+  cuando Gemini Live reconecta o comprime contexto antes de que la sesion se sintetice en nota
+  durable. Reinyeccion automatica del contexto vivo al reconectar via `dynamic_context_provider`
+  en `gemini/session.py`. Determinista, acotado (turnos <=20, chars <=12000) y fail-safe.
+  Config: `JARVIS_CURRENT_SESSION_RECALL_TURNS`/`_CHARS`.
+- Study mode con flush en segundo plano: `StudyModeController.flush_background`/`stop_background`
+  + worker dedicado vuelcan la evidencia acumulada a la nota sin bloquear la conversacion.
+- Umbrales de "tool largo" y prewarm de GPT 5.5: `LONG_TOOL_TOKEN_THRESHOLDS` +
+  `_is_long_tool_request` detectan peticiones de informe largo y aplican timeouts extendidos;
+  el cliente OpenAI admite inyeccion para warmup sin `api_key` (testeable).
 - KSI Fase 4 - auto-critica en escritura: nuevo modulo `memory/self_improvement/write_critique.py`.
   `jarvis_remember` refina de forma autonoma los `content` vagos antes de persistirlos
   (deteccion determinista bilingue ES/EN + reasoner presupuestado con JSON self-heal).
