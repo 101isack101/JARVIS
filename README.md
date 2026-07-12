@@ -4,7 +4,7 @@ Asistente estilo Gemini Live con voz bidireccional, visión de pantalla, compute
 
 > **Status:** Copiloto local funcional. Voz bidireccional, overlay, hotkeys, memoria RAG, Claude tool, vision/screen capture, action executor seguro, modos, telemetry y budgets ya existen.
 
-> **Version actual:** v1.03 — UI Tauri + React 100% funcional + nucleo de energia
+> **Version actual:** v1.06 — Agent Runtime read-only, UI Tauri + React y núcleos nativos de audio/visión
 
 ---
 
@@ -34,6 +34,8 @@ Esto arranca el shell Tauri que:
 - **Gemini Live** (`google-genai`): voz speech-to-speech nativo, barge-in, vision
 - **GPT 5.5** (`openai`): tool `ask_gpt55_code` para generar codigo, debugging, arquitectura de software y modo agentico
 - **Claude 4.6 Sonnet** (`anthropic`): tool `ask_claude_deep` para razonamiento profundo general y fallback
+- **Audio hibrido C++/Python**: AEC/resample de far-end puede usar `audio/native/bin/jarvis_audio_native.dll` y cae a Python si no esta compilado
+- **Vision hibrida C++/Python**: captura de camara puede usar `vision/native/bin/jarvis_vision_sidecar.exe` para liberar Python en modo vision continuo, con fallback OpenCV
 - **UI Tauri + React** (`jarvis-desktop.exe`): ventana nativa con React 19 + Tailwind v4 + framer-motion, SSE bridge headless
 - **Overlay tkinter** (legacy): interfaz clasica, invisible a Zoom/Teams via `WDA_EXCLUDEFROMCAPTURE`
 - **Vision**: `Ctrl+Shift+S`, `Ctrl+Alt+S` y tool `screen_look` capturan pantalla/region para Gemini
@@ -126,8 +128,9 @@ Ejecutar los dos spikes en orden. Ambos deberían terminar en <30s.
 - **Hecho:** Retención automática de screenshots vía `JARVIS_SCREENSHOT_RETENTION_HOURS`
 - **Hecho:** English Practice Mode activable por voz con `english_practice`
 - **Hecho:** UI Tauri + React 19 como modo principal (`jarvis-desktop.exe`): SSE bridge headless, watchdog anti-zombie, ApprovalModal HITL, CameraPanel live, Transcript markdown, Telemetry SVG
+- **Hecho:** Agent Runtime v0 con misiones read-only persistentes, ejecución background, cancelación, recovery, evidencia verificada y panel de progreso
 - **Pendiente:** Autopilot con confirmaciones y acciones de escritura controladas
-- **Pendiente:** Dashboard/log viewer para inspeccionar decisiones de Jarvis
+- **Pendiente:** Historial ampliado de errores y artefactos en el dashboard
 
 ---
 
@@ -227,6 +230,46 @@ No apuntes esa variable a `C:\`, `Windows`, `Program Files`, `ProgramData` ni
 
 ---
 
+## Agent Runtime v0
+
+El runtime de misiones permite que JARVIS investigue objetivos locales de varios pasos
+sin bloquear la conversación. Está desactivado por defecto; para probarlo, configura:
+
+```dotenv
+JARVIS_AGENT_RUNTIME_ENABLED=true
+```
+
+Ejemplos naturales:
+
+```text
+evalúa el estado técnico de JARVIS y prioriza lo siguiente
+cómo va la misión
+lista mis misiones recientes
+cancela la misión msn_...
+```
+
+Gemini usa internamente `jarvis_task(create|status|list|cancel)`. `create` devuelve un
+`mission_id` inmediatamente y el worker continúa en background. El estado durable se
+guarda en `data/agent_runtime/agent_runtime.db`; la evidencia redactada vive en
+`data/agent_runtime/artifacts/`. Tras un cierre duro, el siguiente arranque reconcilia los
+steps sin repetir artefactos confirmados.
+
+Límites de seguridad de v0:
+
+- Solo nivel L1 read-only y root del proyecto `JARVIS`.
+- Solo `list_dir`, `read_file`, `search_text`, `git_status`, `git_diff_stat` y `git_log`.
+- Sin PowerShell libre, escritura, tests, instalaciones, navegador ni otros proyectos.
+- Una misión activa, máximo ocho pasos, deadline y outputs acotados.
+- `completed` requiere postcondiciones, artefactos con hash e informe con referencias
+  `[step:sN]`.
+
+La configuración completa está en `.env.example`. Constitución, spec y plan:
+`docs/agent_runtime/constitution.md`,
+`docs/superpowers/specs/2026-07-11-agent-runtime-v0-design.md` y
+`docs/superpowers/plans/2026-07-11-agent-runtime-v0.md`.
+
+---
+
 ## Skills Runtime
 
 Jarvis tiene skills runtime activables con la tool conversacional `jarvis_skill`.
@@ -290,6 +333,7 @@ Jarvis/
 ├── gemini/                     # GeminiLiveSession + tools + system prompt
 ├── claude/                     # ask_claude_deep wrapper
 ├── actions/                    # Computer use read-only estructurado
+├── agent_runtime/              # Misiones durables, policy, planner y verifier
 ├── vision/                     # screen capture
 ├── mcp_obsidian/                # MCP stdio server/client para Obsidian
 ├── memory/                     # SQLite + FAISS RAG

@@ -3,7 +3,9 @@ import type { Dispatch, SetStateAction } from 'react'
 import type {
   JarvisState, JarvisMode, ConnectionStatus, LogEvent,
   BudgetPayload, MemoryStats, AgentToolEvent, AudioTelemetry,
-  ApprovalPayload, JarvisSnapshot, SystemStats, Weather,
+  ApprovalPayload, ConversationMessage, ConversationRole, JarvisSnapshot,
+  RuntimeTelemetry, SystemStats, Weather,
+  MissionEvent, MissionSummary,
 } from './types'
 
 export interface JarvisUIState {
@@ -15,11 +17,15 @@ export interface JarvisUIState {
   connectionDetail: string
   inputTranscript: string
   outputTranscript: string
+  conversationMessages: ConversationMessage[]
   events: LogEvent[]
   memory: MemoryStats
   budget: BudgetPayload | null
   agentTools: AgentToolEvent[]
+  missions: MissionSummary[]
+  missionEvents: MissionEvent[]
   audioTelemetry: AudioTelemetry | null
+  runtimeTelemetry: RuntimeTelemetry | null
   latencyLines: string[]
   pendingApproval: ApprovalPayload | null
   cameraActive: boolean
@@ -38,11 +44,15 @@ const INITIAL: JarvisUIState = {
   connectionDetail: '',
   inputTranscript: '',
   outputTranscript: '',
+  conversationMessages: [],
   events: [],
   memory: { ok: 0, active: 0, error: 0 },
   budget: null,
   agentTools: [],
+  missions: [],
+  missionEvents: [],
   audioTelemetry: null,
+  runtimeTelemetry: null,
   latencyLines: [],
   pendingApproval: null,
   cameraActive: false,
@@ -70,6 +80,48 @@ function logEventFromArgs(args: unknown[]): LogEvent {
   }
 }
 
+function makeConversationMessage(role: ConversationRole, text: string): ConversationMessage {
+  return {
+    id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
+    role,
+    text,
+    stamp: currentStamp(),
+  }
+}
+
+function appendConversationChunk(
+  messages: ConversationMessage[],
+  role: ConversationRole,
+  chunk: string,
+): ConversationMessage[] {
+  if (!chunk) return messages
+  const last = messages[messages.length - 1]
+  if (last?.role === role) {
+    const text = role === 'user'
+      ? `${last.text} ${chunk}`.replace(/\s+/g, ' ').trim()
+      : `${last.text}${chunk}`
+    return [
+      ...messages.slice(0, -1),
+      { ...last, text: text.slice(-16000) },
+    ]
+  }
+  return [...messages.slice(-79), makeConversationMessage(role, chunk)]
+}
+
+function fallbackConversationMessages(input: string, output: string): ConversationMessage[] {
+  const messages: ConversationMessage[] = []
+  if (input) messages.push({ ...makeConversationMessage('user', input), id: 'snapshot-user' })
+  if (output) messages.push({ ...makeConversationMessage('jarvis', output), id: 'snapshot-jarvis' })
+  return messages
+}
+
+function upsertMission(missions: MissionSummary[], mission: MissionSummary): MissionSummary[] {
+  const without = missions.filter(item => item.id !== mission.id)
+  return [...without, mission]
+    .sort((a, b) => (a.updated_at || a.created_at).localeCompare(b.updated_at || b.created_at))
+    .slice(-20)
+}
+
 function applyCommand(set: UiDispatch, command: string, args: unknown[]) {
   set(prev => {
     switch (command) {
@@ -85,11 +137,17 @@ function applyCommand(set: UiDispatch, command: string, args: unknown[]) {
           connectionDetail: snap.connection.detail,
           inputTranscript: snap.inputTranscript,
           outputTranscript: snap.outputTranscript,
+          conversationMessages: snap.conversationMessages?.length
+            ? snap.conversationMessages
+            : fallbackConversationMessages(snap.inputTranscript, snap.outputTranscript),
           events: snap.events,
           memory: snap.memory,
           budget: snap.budget,
           agentTools: snap.agentEvents ?? [],
+          missions: snap.missions ?? [],
+          missionEvents: snap.missionEvents ?? [],
           audioTelemetry: snap.audioTelemetry ?? null,
+          runtimeTelemetry: snap.runtimeTelemetry ?? null,
           latencyLines: snap.latency ?? [],
           cameraActive: Boolean(snap.cameraActive),
           cameraFrame: snap.cameraFrame ?? null,
@@ -105,9 +163,28 @@ function applyCommand(set: UiDispatch, command: string, args: unknown[]) {
         connectionStatus: args[0] as ConnectionStatus,
         connectionDetail: args[1] as string ?? '',
       }
-      case 'appendInput':  return { ...prev, inputTranscript: prev.inputTranscript + (args[0] as string) }
-      case 'appendOutput': return { ...prev, outputTranscript: prev.outputTranscript + (args[0] as string) }
-      case 'clearTranscripts': return { ...prev, inputTranscript: '', outputTranscript: '' }
+      case 'appendInput': {
+        const chunk = args[0] as string
+        return {
+          ...prev,
+          inputTranscript: `${prev.inputTranscript} ${chunk}`.trim(),
+          conversationMessages: appendConversationChunk(prev.conversationMessages, 'user', chunk),
+        }
+      }
+      case 'appendOutput': {
+        const chunk = args[0] as string
+        return {
+          ...prev,
+          outputTranscript: prev.outputTranscript + chunk,
+          conversationMessages: appendConversationChunk(prev.conversationMessages, 'jarvis', chunk),
+        }
+      }
+      case 'clearTranscripts': return {
+        ...prev,
+        inputTranscript: '',
+        outputTranscript: '',
+        conversationMessages: [],
+      }
       case 'logEvent': {
         const ev = logEventFromArgs(args)
         return { ...prev, events: [...prev.events.slice(-49), ev] }
@@ -135,7 +212,16 @@ function applyCommand(set: UiDispatch, command: string, args: unknown[]) {
           agentTools: matched ? updated : [...prev.agentTools.slice(-29), ev],
         }
       }
+      case 'missionUpdated': {
+        const mission = args[0] as MissionSummary
+        return { ...prev, missions: upsertMission(prev.missions, mission) }
+      }
+      case 'missionEvent': {
+        const event = args[0] as MissionEvent
+        return { ...prev, missionEvents: [...prev.missionEvents.slice(-99), event] }
+      }
       case 'audioTelemetry': return { ...prev, audioTelemetry: args[0] as AudioTelemetry }
+      case 'runtimeTelemetry': return { ...prev, runtimeTelemetry: args[0] as RuntimeTelemetry }
       case 'turnLatency': {
         const line = args[0] as string
         return { ...prev, latencyLines: [...prev.latencyLines.slice(-19), line] }

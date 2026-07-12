@@ -20,15 +20,55 @@ cubrir colas de eco largas sin una FFT gigante.
 
 Sobre `cleaned` el wake-word (o un VAD) ya puede detectar a Isaac.
 
-Sin dependencias nativas: solo numpy (+ scipy para resampleo en el caller).
+Por defecto intenta usar el backend C++ opcional (`audio/native`) para los hot
+paths de audio. Si el DLL no esta compilado, cae al backend NumPy existente.
 Todo a 16kHz mono float32 internamente.
 """
 
 from __future__ import annotations
 
+import os
 import threading
 
 import numpy as np
+
+_NATIVE_RESAMPLE_FALLBACK = False
+
+
+def _native_audio_mode(native: bool | None = None) -> str:
+    """Return one of: off, auto, required."""
+    if native is False:
+        return "off"
+    if native is True:
+        return "required"
+    raw = os.environ.get("JARVIS_AUDIO_NATIVE", "auto").strip().lower()
+    if raw in {"0", "false", "no", "off", "python", "disabled"}:
+        return "off"
+    if raw in {"required", "require", "force", "forced", "native"}:
+        return "required"
+    return "auto"
+
+
+def _make_echo_canceller(
+    *,
+    block: int,
+    partitions: int,
+    mu: float,
+    native: bool | None,
+):
+    mode = _native_audio_mode(native)
+    if mode != "off":
+        try:
+            from audio.native_aec import NativeEchoCanceller
+
+            return (
+                NativeEchoCanceller(block=block, partitions=partitions, mu=mu),
+                "native",
+            )
+        except Exception:
+            if mode == "required":
+                raise
+    return EchoCanceller(block=block, partitions=partitions, mu=mu), "python"
 
 
 class EchoCanceller:
@@ -127,7 +167,24 @@ class EchoCanceller:
 
 
 def resample_24k_to_16k(pcm_24k: np.ndarray) -> np.ndarray:
-    """Resamplea float 24kHz -> 16kHz (ratio 2/3) via scipy.signal."""
+    """Resamplea float 24kHz -> 16kHz (ratio 2/3).
+
+    Uses the optional native backend for the low-latency speaker-reference path
+    when available; otherwise falls back to scipy's high-quality polyphase
+    resampler.
+    """
+    global _NATIVE_RESAMPLE_FALLBACK
+    mode = _native_audio_mode()
+    if mode != "off" and not _NATIVE_RESAMPLE_FALLBACK:
+        try:
+            from audio.native_aec import resample_24k_to_16k_native
+
+            return resample_24k_to_16k_native(pcm_24k)
+        except Exception:
+            if mode == "required":
+                raise
+            _NATIVE_RESAMPLE_FALLBACK = True
+
     from scipy.signal import resample_poly
 
     return resample_poly(pcm_24k, up=2, down=3).astype(np.float32)
@@ -145,9 +202,20 @@ class AECStream:
         el audio limpio en int16.
     """
 
-    def __init__(self, block: int = 512, partitions: int = 8, mu: float = 0.3) -> None:
+    def __init__(
+        self,
+        block: int = 512,
+        partitions: int = 8,
+        mu: float = 0.3,
+        native: bool | None = None,
+    ) -> None:
         self.N = block
-        self._aec = EchoCanceller(block=block, partitions=partitions, mu=mu)
+        self._aec, self.backend_name = _make_echo_canceller(
+            block=block,
+            partitions=partitions,
+            mu=mu,
+            native=native,
+        )
         self._lock = threading.Lock()
         self._far = np.zeros(0, dtype=np.float32)   # ring de far-end (16k)
         self._near_buf = np.zeros(0, dtype=np.float32)  # near pendiente < N

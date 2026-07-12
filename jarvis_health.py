@@ -140,6 +140,116 @@ def _check_speaker() -> Check:
                      elapsed_ms=(time.perf_counter() - t0) * 1000)
 
 
+def _audio_native_mode() -> str:
+    raw = os.environ.get("JARVIS_AUDIO_NATIVE", "auto").strip().lower()
+    if raw in {"0", "false", "no", "off", "python", "disabled"}:
+        return "off"
+    if raw in {"required", "require", "force", "forced", "native"}:
+        return "required"
+    return "auto"
+
+
+def _check_native_audio() -> Check:
+    """Report optional C++ audio backend status.
+
+    In auto mode a missing DLL is only a warning because Python AEC remains the
+    supported fallback. In required mode it becomes a startup blocker.
+    """
+    t0 = time.perf_counter()
+    mode = _audio_native_mode()
+    if mode == "off":
+        return Check(
+            name="native_audio",
+            ok=True,
+            detail="desactivado por JARVIS_AUDIO_NATIVE=off",
+            elapsed_ms=(time.perf_counter() - t0) * 1000,
+            optional=True,
+        )
+    try:
+        from audio.native_aec import native_audio_status
+
+        status = native_audio_status()
+    except Exception as exc:
+        return Check(
+            name="native_audio",
+            ok=False,
+            detail=f"status no disponible: {type(exc).__name__}: {exc}",
+            elapsed_ms=(time.perf_counter() - t0) * 1000,
+            optional=(mode != "required"),
+        )
+    if status.available:
+        return Check(
+            name="native_audio",
+            ok=True,
+            detail=f"{status.version or 'loaded'} ({status.path})",
+            elapsed_ms=(time.perf_counter() - t0) * 1000,
+            optional=True,
+        )
+    detail = status.detail
+    if mode == "auto":
+        detail = f"{detail}; usando fallback Python"
+    return Check(
+        name="native_audio",
+        ok=False,
+        detail=detail,
+        elapsed_ms=(time.perf_counter() - t0) * 1000,
+        optional=(mode != "required"),
+    )
+
+
+def _vision_native_mode() -> str:
+    raw = os.environ.get("JARVIS_VISION_NATIVE", "auto").strip().lower()
+    if raw in {"0", "false", "no", "off", "python", "opencv", "disabled"}:
+        return "off"
+    if raw in {"required", "require", "force", "forced", "native"}:
+        return "required"
+    return "auto"
+
+
+def _check_native_vision() -> Check:
+    """Report optional C++ camera sidecar status."""
+    t0 = time.perf_counter()
+    mode = _vision_native_mode()
+    if mode == "off":
+        return Check(
+            name="native_vision",
+            ok=True,
+            detail="desactivado por JARVIS_VISION_NATIVE=off",
+            elapsed_ms=(time.perf_counter() - t0) * 1000,
+            optional=True,
+        )
+    try:
+        from vision.native_capture import native_vision_status
+
+        status = native_vision_status()
+    except Exception as exc:
+        return Check(
+            name="native_vision",
+            ok=False,
+            detail=f"status no disponible: {type(exc).__name__}: {exc}",
+            elapsed_ms=(time.perf_counter() - t0) * 1000,
+            optional=(mode != "required"),
+        )
+    if status.available:
+        return Check(
+            name="native_vision",
+            ok=True,
+            detail=f"{status.version or 'loaded'} ({status.path})",
+            elapsed_ms=(time.perf_counter() - t0) * 1000,
+            optional=True,
+        )
+    detail = status.detail
+    if mode == "auto":
+        detail = f"{detail}; usando fallback OpenCV/Python"
+    return Check(
+        name="native_vision",
+        ok=False,
+        detail=detail,
+        elapsed_ms=(time.perf_counter() - t0) * 1000,
+        optional=(mode != "required"),
+    )
+
+
 def _check_vault() -> Check:
     t0 = time.perf_counter()
     vault_str = os.environ.get("JARVIS_OBSIDIAN_VAULT", "")
@@ -293,6 +403,8 @@ def run_healthcheck(strict: bool = True, ping_gemini: bool = False,
         _check_vault(),
         _check_mic(),
         _check_speaker(),
+        _check_native_audio(),
+        _check_native_vision(),
         _check_spotify_scope(),
     ]
     if ping_gemini:

@@ -1,0 +1,5 @@
+# Intentional secret-redaction fixtures. These exact historical fingerprints
+# contain synthetic values used to prove JARVIS removes secrets from text.
+2046d6f4f4e431a0bc2047426346355a486a0750:tests/test_semantic_memory.py:generic-api-key:106
+ef2eadb28035d5c373e20902a58871e2ffe1323b:tests/test_security_policy.py:generic-api-key:40
+ef2eadb28035d5c373e20902a58871e2ffe1323b:tests/test_security_policy.py:generic-api-key:41

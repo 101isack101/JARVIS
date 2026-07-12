@@ -65,10 +65,13 @@ class ApprovalAction:
 
 _WEB_DIST = Path(__file__).resolve().parent / "web_dist"
 _WEB_FALLBACK = Path(__file__).resolve().parent / "web_ui"
+_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8765
 REFRESH_MS = 500
 DEFAULT_AUDIO_VISUAL_FPS = 30
+USAGE_RATE_WINDOW_S = 30.0
+CAMERA_RATE_WINDOW_S = 5.0
 
 
 def _env_truthy(name: str, default: bool = False) -> bool:
@@ -92,6 +95,18 @@ def _audio_emit_interval_from_env() -> float:
     except ValueError:
         fps = DEFAULT_AUDIO_VISUAL_FPS
     return 1.0 / max(1, fps)
+
+
+def _camera_emit_interval_from_env() -> float:
+    raw = os.environ.get("JARVIS_CAMERA_PREVIEW_FPS", "").strip()
+    if not raw:
+        raw = os.environ.get("JARVIS_CAMERA_FPS", "4.0").strip()
+    try:
+        fps = float(raw)
+    except ValueError:
+        fps = 4.0
+    fps = max(0.1, min(fps, 15.0))
+    return 1.0 / fps
 
 
 def resolve_web_dir() -> Path:
@@ -264,10 +279,14 @@ class WebJarvisOverlay:
         self._connection_detail = ""
         self._input_text = ""
         self._output_text = ""
+        self._conversation_messages: list[dict[str, Any]] = []
+        self._conversation_seq = 0
         self._events: list[str] = []
         self._event_history: list[tuple[str, str, str]] = []
         self._memory_events: list[dict[str, Any]] = []
         self._agent_events: list[dict[str, Any]] = []
+        self._missions: dict[str, dict[str, Any]] = {}
+        self._mission_events: list[dict[str, Any]] = []
         self._audio_telemetry: dict[str, Any] = {}
         self._latency_lines: list[str] = []
         self._camera_active = False
@@ -283,6 +302,14 @@ class WebJarvisOverlay:
         self._last_camera_emit_ts = 0.0
         self._tool_event_seq = 0
         self._audio_emit_interval_s = _audio_emit_interval_from_env()
+        self._camera_emit_interval_s = _camera_emit_interval_from_env()
+        self._usage_rate_samples: list[tuple[float, dict[str, int], dict[str, float]]] = []
+        self._camera_stream_samples: list[tuple[float, int]] = []
+        self._camera_preview_samples: list[tuple[float, int]] = []
+        self._camera_stream_total_bytes = 0
+        self._camera_preview_total_bytes = 0
+        self._camera_stream_total_frames = 0
+        self._camera_preview_total_frames = 0
         self._closed = False
         self._close_event = threading.Event()
         self._log_path = Path(__file__).resolve().parent.parent / "data" / "jarvis.log"
@@ -400,18 +427,22 @@ class WebJarvisOverlay:
             "privacy": self.privacy_label_text(),
             "inputTranscript": self._input_text[-12000:],
             "outputTranscript": self._output_text[-16000:],
+            "conversationMessages": self._conversation_messages[-80:],
             "events": [
                 {"stamp": stamp, "level": level, "message": message}
                 for stamp, level, message in self._event_history[-8:]
             ],
             "memory": self._memory_stats(),
             "agentEvents": self._agent_events[-30:],
+            "missions": list(self._missions.values())[-20:],
+            "missionEvents": self._mission_events[-100:],
             "audioTelemetry": self._audio_telemetry,
             "latency": self._latency_lines,
             "cameraActive": self._camera_active,
             "cameraFrame": self._camera_frame_b64,
             "cameraFocus": self._camera_focus,
             "budget": self._budget_payload(),
+            "runtimeTelemetry": self._runtime_telemetry_payload(),
             "systemStats": self._system_stats(),
             "weather": self._weather,
         }
@@ -476,12 +507,14 @@ class WebJarvisOverlay:
         if not text:
             return
         self._input_text = f"{self._input_text} {text}".strip()[-12000:]
+        self._append_conversation_message("user", text, separator=" ")
         self.emit("appendInput", text)
 
     def append_output(self, text: str) -> None:
         if not text:
             return
         self._output_text = f"{self._output_text}{text}"[-16000:]
+        self._append_conversation_message("jarvis", text, separator="")
         self.emit("appendOutput", text)
 
     def feed_voice_audio(self, pcm_bytes: bytes) -> None:
@@ -494,8 +527,71 @@ class WebJarvisOverlay:
     def reset_transcripts(self) -> None:
         self._input_text = ""
         self._output_text = ""
+        self._conversation_messages = []
         self.emit("clearTranscripts")
         self.log_event("Transcript reiniciado")
+
+    def export_conversation(self) -> Path | None:
+        text = self._conversation_markdown()
+        if not text.strip():
+            self.log_event("No hay conversacion para extraer", "warn")
+            self.emit("conversationExtracted", {"ok": False, "error": "empty"})
+            return None
+        raw_dir = os.environ.get("JARVIS_CONVERSATION_EXPORT_DIR", "").strip()
+        out_dir = Path(raw_dir).expanduser() if raw_dir else _ROOT / "data" / "conversations"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        path = out_dir / f"jarvis-conversation-{time.strftime('%Y%m%d-%H%M%S')}.md"
+        path.write_text(text, encoding="utf-8")
+        self.log_event(f"Conversacion extraida: {path.name}", "ok")
+        self.emit("conversationExtracted", {"ok": True, "path": str(path)})
+        return path
+
+    def _conversation_markdown(self) -> str:
+        messages = list(self._conversation_messages)
+        fallback = []
+        if self._input_text.strip():
+            fallback.append({"role": "user", "text": self._input_text.strip(), "stamp": ""})
+        if self._output_text.strip():
+            fallback.append({"role": "jarvis", "text": self._output_text.strip(), "stamp": ""})
+        messages = messages or fallback
+        if not messages:
+            return ""
+
+        lines = [
+            "# Conversacion JARVIS",
+            "",
+            f"Extraida: {time.strftime('%Y-%m-%d %H:%M:%S')}",
+            f"Mensajes: {len(messages)}",
+            "",
+        ]
+        for message in messages:
+            role = "Isaac" if message.get("role") == "user" else "JARVIS"
+            stamp = str(message.get("stamp") or "").strip()
+            heading = f"## {role}" + (f" - {stamp}" if stamp else "")
+            body = str(message.get("text") or "").strip()
+            lines.extend([heading, "", body, ""])
+        return "\n".join(lines).strip() + "\n"
+
+    def _append_conversation_message(self, role: str, text: str, *, separator: str) -> None:
+        text = text or ""
+        if not text:
+            return
+        if self._conversation_messages and self._conversation_messages[-1].get("role") == role:
+            current = str(self._conversation_messages[-1].get("text", ""))
+            if separator and current and text:
+                updated = f"{current}{separator}{text}".strip()
+            else:
+                updated = f"{current}{text}"
+            self._conversation_messages[-1]["text"] = updated[-16000:]
+            return
+        self._conversation_seq += 1
+        self._conversation_messages.append({
+            "id": f"msg-{self._conversation_seq}",
+            "role": role,
+            "text": text[-16000:],
+            "stamp": time.strftime("%H:%M"),
+        })
+        self._conversation_messages = self._conversation_messages[-80:]
 
     def record_tool_start(self, name: str, args: dict[str, Any] | None = None) -> None:
         """Registra cualquier tool para el thought log web.
@@ -556,6 +652,45 @@ class WebJarvisOverlay:
         self._agent_events = self._agent_events[-150:]
         self.emit("agentToolEnd", entry)
         self.record_memory_tool_end(name, elapsed_ms, ok, response)
+
+    def set_missions(self, missions: list[dict[str, Any]]) -> None:
+        """Carga summaries persistidos al conectar el runtime, sin artefactos crudos."""
+        ordered = sorted(
+            [item for item in (missions or []) if isinstance(item, dict) and item.get("id")],
+            key=lambda item: str(item.get("updated_at") or item.get("created_at") or ""),
+        )[-20:]
+        self._missions = {
+            str(item.get("id")): dict(item)
+            for item in ordered
+        }
+
+    def record_mission_event(self, event: dict[str, Any]) -> None:
+        """Actualiza timeline SSE después de que el runtime persistió el evento."""
+        if not isinstance(event, dict):
+            return
+        mission = event.get("mission")
+        if isinstance(mission, dict) and mission.get("id"):
+            mission = dict(mission)
+            self._missions[str(mission["id"])] = mission
+            # Mantener únicamente las 20 más recientes por updated_at.
+            ordered = sorted(
+                self._missions.values(),
+                key=lambda item: str(item.get("updated_at") or item.get("created_at") or ""),
+            )[-20:]
+            self._missions = {str(item["id"]): item for item in ordered}
+            self.emit("missionUpdated", mission)
+        clean_event = {
+            "id": event.get("id"),
+            "mission_id": event.get("mission_id"),
+            "step_id": event.get("step_id"),
+            "event_type": event.get("event_type"),
+            "level": event.get("level", "info"),
+            "payload": event.get("payload") if isinstance(event.get("payload"), dict) else {},
+            "created_at": event.get("created_at"),
+        }
+        self._mission_events.append(clean_event)
+        self._mission_events = self._mission_events[-100:]
+        self.emit("missionEvent", clean_event)
 
     def record_audio_telemetry(self, payload: dict[str, Any]) -> None:
         self._audio_telemetry = {**payload, "stamp": time.strftime("%H:%M:%S")}
@@ -661,6 +796,9 @@ class WebJarvisOverlay:
         if command == "clearTranscripts":
             self.after(0, self.reset_transcripts)
             return True
+        if command == "extractConversation":
+            self.after(0, self.export_conversation)
+            return True
         if command == "openDashboard":
             self.after(0, self.open_dashboard)
             return True
@@ -696,16 +834,52 @@ class WebJarvisOverlay:
         self.emit("setCameraActive", self._camera_active)
 
     def update_camera_preview(self, frame) -> None:
-        """Envia frame JPEG como base64 por SSE (throttle 4fps)."""
+        """Envia frame JPEG como base64 por SSE con throttle configurable."""
+        jpeg_bytes = frame.jpeg_bytes
+        self._record_camera_stream_frame(len(jpeg_bytes))
         now = time.monotonic()
-        if now - self._last_camera_emit_ts < 0.25:  # 4fps max
+        if now - self._last_camera_emit_ts < self._camera_emit_interval_s:
             return
         self._last_camera_emit_ts = now
-        self._camera_frame_b64 = base64.b64encode(frame.jpeg_bytes).decode("ascii")
+        self._record_camera_preview_frame(len(jpeg_bytes))
+        self._camera_frame_b64 = base64.b64encode(jpeg_bytes).decode("ascii")
         if not self._camera_active:
             self._camera_active = True
             self.emit("setCameraActive", True)
         self.emit("cameraFrame", self._camera_frame_b64)
+
+    def _record_camera_stream_frame(self, size_bytes: int) -> None:
+        now = time.monotonic()
+        self._camera_stream_samples.append((now, max(0, int(size_bytes))))
+        self._camera_stream_samples = [
+            sample for sample in self._camera_stream_samples
+            if now - sample[0] <= CAMERA_RATE_WINDOW_S
+        ]
+        self._camera_stream_total_bytes += max(0, int(size_bytes))
+        self._camera_stream_total_frames += 1
+
+    def _record_camera_preview_frame(self, size_bytes: int) -> None:
+        now = time.monotonic()
+        # SSE envia base64: ~33% mas bytes que el JPEG original.
+        wire_bytes = int(max(0, size_bytes) * 4 / 3)
+        self._camera_preview_samples.append((now, wire_bytes))
+        self._camera_preview_samples = [
+            sample for sample in self._camera_preview_samples
+            if now - sample[0] <= CAMERA_RATE_WINDOW_S
+        ]
+        self._camera_preview_total_bytes += wire_bytes
+        self._camera_preview_total_frames += 1
+
+    def _bandwidth_payload(self, samples: list[tuple[float, int]], now: float) -> dict[str, float]:
+        samples[:] = [sample for sample in samples if now - sample[0] <= CAMERA_RATE_WINDOW_S]
+        if not samples:
+            return {"fps": 0.0, "kbps": 0.0}
+        oldest = samples[0][0]
+        elapsed = max(0.001, min(CAMERA_RATE_WINDOW_S, now - oldest))
+        return {
+            "fps": round(len(samples) / elapsed, 1),
+            "kbps": round(sum(size for _ts, size in samples) / elapsed / 1024, 1),
+        }
 
     def set_camera_focus(self, box_px: Any, label: str = "") -> None:
         """Envia bounding box de foco al frontend por SSE."""
@@ -771,6 +945,7 @@ class WebJarvisOverlay:
             return
         try:
             self.emit("updateBudget", self._budget_payload())
+            self.emit("runtimeTelemetry", self._runtime_telemetry_payload())
             self.emit("updateMemoryStats", self._memory_stats())
             stats = self._system_stats()
             if stats:
@@ -852,6 +1027,67 @@ class WebJarvisOverlay:
             }
         except Exception:
             return None
+
+    def _runtime_telemetry_payload(self) -> dict[str, Any]:
+        now = time.monotonic()
+        tokens = self.tracker.tokens_by_provider()
+        costs = self.tracker.cost_by_provider()
+        self._usage_rate_samples.append((now, dict(tokens), dict(costs)))
+        self._usage_rate_samples = [
+            sample for sample in self._usage_rate_samples
+            if now - sample[0] <= USAGE_RATE_WINDOW_S
+        ]
+        oldest_ts, oldest_tokens, oldest_costs = self._usage_rate_samples[0]
+        elapsed = max(0.001, now - oldest_ts)
+
+        def provider(name: str) -> dict[str, Any]:
+            token_count = int(tokens.get(name, 0))
+            cost = float(costs.get(name, 0.0))
+            token_rate = max(0.0, (token_count - int(oldest_tokens.get(name, 0))) * 60.0 / elapsed)
+            cost_rate = max(0.0, (cost - float(oldest_costs.get(name, 0.0))) * 60.0 / elapsed)
+            return {
+                "tokens": token_count,
+                "tokensLabel": _format_tokens(token_count),
+                "costUsd": round(cost, 6),
+                "tokensPerMin": round(token_rate, 1),
+                "usdPerMin": round(cost_rate, 6),
+            }
+
+        stream = self._bandwidth_payload(self._camera_stream_samples, now)
+        preview = self._bandwidth_payload(self._camera_preview_samples, now)
+        names = ("gemini", "claude", "other")
+        total_tokens = sum(int(tokens.get(name, 0)) for name in names)
+        total_cost = sum(float(costs.get(name, 0.0)) for name in names)
+        old_total_tokens = sum(int(oldest_tokens.get(name, 0)) for name in names)
+        old_total_cost = sum(float(oldest_costs.get(name, 0.0)) for name in names)
+        return {
+            "stamp": time.strftime("%H:%M:%S"),
+            "windowS": int(USAGE_RATE_WINDOW_S),
+            "cameraWindowS": int(CAMERA_RATE_WINDOW_S),
+            "totalTokens": total_tokens,
+            "totalTokensLabel": _format_tokens(total_tokens),
+            "totalUsd": round(total_cost, 6),
+            "totalTokensPerMin": round(max(0.0, (total_tokens - old_total_tokens) * 60.0 / elapsed), 1),
+            "totalUsdPerMin": round(max(0.0, (total_cost - old_total_cost) * 60.0 / elapsed), 6),
+            "gemini": provider("gemini"),
+            "claude": provider("claude"),
+            "other": provider("other"),
+            "camera": {
+                "active": self._camera_active,
+                "streamFps": stream["fps"],
+                "streamKbps": stream["kbps"],
+                "previewFps": preview["fps"],
+                "previewKbps": preview["kbps"],
+                "streamFrames": self._camera_stream_total_frames,
+                "previewFrames": self._camera_preview_total_frames,
+                "streamMb": round(self._camera_stream_total_bytes / (1024 * 1024), 3),
+                "previewMb": round(self._camera_preview_total_bytes / (1024 * 1024), 3),
+                "avgFrameKb": round(
+                    (self._camera_stream_total_bytes / max(1, self._camera_stream_total_frames)) / 1024,
+                    1,
+                ),
+            },
+        }
 
     def _budget_payload(self) -> dict[str, Any]:
         report = self.gate.evaluate(self.tracker)

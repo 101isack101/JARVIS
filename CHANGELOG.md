@@ -2,6 +2,20 @@
 
 Todas las versiones relevantes de JARVIS se documentan aqui.
 
+## 1.06 - 2026-07-11
+
+### Added
+
+- Agent Runtime v0 para misiones persistentes L1 read-only: planner estructurado,
+  policy Python con catálogo cerrado, executor background, cancelación cooperativa,
+  recovery después de restart/kill, artefactos redactados con SHA-256 y verificación
+  obligatoria antes de `completed`.
+- Tool `jarvis_task(create|status|list|cancel)` para crear y observar trabajo largo sin
+  bloquear Gemini Live. Estado SQLite en `data/agent_runtime/agent_runtime.db`.
+- Timeline SSE y panel React de misiones con progreso, estado, errores y cancelación.
+- Constitución, especificación, contratos, schema y plan trazable del Agent Runtime en
+  `docs/agent_runtime/` y `docs/superpowers/`.
+
 ## 1.04 - 2026-06-19
 
 ### Added

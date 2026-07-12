@@ -22,6 +22,13 @@ from typing import Any, Callable
 import numpy as np
 from PIL import Image
 
+from vision.native_capture import (
+    NativeCameraStream,
+    capture_once as native_capture_once,
+    native_vision_mode,
+    native_vision_status,
+)
+
 try:  # cv2 es pesado; en algunos entornos de test se inyecta device_factory
     import cv2
 except Exception:  # pragma: no cover
@@ -162,6 +169,11 @@ class CameraCapture:
         self.warmup_frames = max(0, int(warmup_frames))
         self._device_factory = device_factory
         self._device: Any | None = None
+        self._native_mode = native_vision_mode()
+        self._native_allowed = device_factory is _default_device_factory and self._native_mode != "off"
+        self._native_stream: NativeCameraStream | None = None
+        self._native_prefetched: CameraFrame | None = None
+        self.backend_name = "opencv"
         self._lock = threading.Lock()
         self._last: CameraFrame | None = None
         self.cleanup_old()
@@ -174,6 +186,13 @@ class CameraCapture:
 
     def capture(self) -> CameraFrame:
         with self._lock:
+            if self._native_allowed:
+                try:
+                    return self._capture_native_once()
+                except Exception as exc:
+                    if self._native_mode == "required":
+                        raise RuntimeError(f"Vision nativa requerida pero fallo: {exc}") from exc
+                    self.backend_name = "opencv"
             dev = self._open_device("foto")
             try:
                 self._warmup(dev)
@@ -194,14 +213,29 @@ class CameraCapture:
         # una vez. El warmup corre bajo el lock; aceptable porque es startup y no
         # compite con read_frame/close hasta que open() retorna.
         with self._lock:
-            if self._device is not None:
+            if self._device is not None or self._native_stream is not None:
                 return
+            if self._native_allowed:
+                try:
+                    self._open_native_stream()
+                    return
+                except Exception as exc:
+                    if self._native_mode == "required":
+                        raise RuntimeError(f"Vision nativa requerida pero fallo: {exc}") from exc
+                    self.backend_name = "opencv"
             dev = self._open_device("modo vision")
             self._warmup(dev)
             self._device = dev
 
     def read_frame(self) -> CameraFrame:
         with self._lock:
+            if self._native_stream is not None:
+                if self._native_prefetched is not None:
+                    frame = self._native_prefetched
+                    self._native_prefetched = None
+                    return frame
+                frame = self._native_stream.read_frame(timeout_s=max(2.0, 2.0 / max(0.1, self.fps)))
+                return self._finalize_jpeg(frame.jpeg_bytes, frame.width, frame.height, prefix="watch")
             if self._device is None:
                 raise RuntimeError("Camara no abierta (llama open() primero).")
             ok, frame_bgr = self._device.read()
@@ -211,6 +245,13 @@ class CameraCapture:
 
     def close(self) -> None:
         with self._lock:
+            if self._native_stream is not None:
+                try:
+                    self._native_stream.close()
+                except Exception:
+                    pass
+                self._native_stream = None
+                self._native_prefetched = None
             if self._device is not None:
                 try:
                     self._device.release()
@@ -255,6 +296,51 @@ class CameraCapture:
             parts.append(f"Dispositivos Windows: {device_summary}")
         return " ".join(parts)
 
+    def _ensure_native_available(self) -> None:
+        status = native_vision_status()
+        if not status.available:
+            raise RuntimeError(status.detail)
+
+    def _capture_native_once(self) -> CameraFrame:
+        self._ensure_native_available()
+        attempts: list[str] = []
+        for index in self._candidate_indices():
+            try:
+                frame = native_capture_once(index=index, max_side=self.max_side)
+                self.index = index
+                self.backend_name = "native"
+                return self._finalize_jpeg(frame.jpeg_bytes, frame.width, frame.height, prefix="cam")
+            except Exception as exc:
+                attempts.append(f"idx={index} {type(exc).__name__}: {exc}")
+        raise RuntimeError("No pude capturar con sidecar nativo. " + " | ".join(attempts))
+
+    def _open_native_stream(self) -> None:
+        self._ensure_native_available()
+        attempts: list[str] = []
+        for index in self._candidate_indices():
+            stream: NativeCameraStream | None = None
+            try:
+                stream = NativeCameraStream(index=index, max_side=self.max_side, fps=self.fps)
+                first = stream.read_frame(timeout_s=6.0)
+                self.index = index
+                self.backend_name = "native"
+                self._native_stream = stream
+                self._native_prefetched = self._finalize_jpeg(
+                    first.jpeg_bytes,
+                    first.width,
+                    first.height,
+                    prefix="watch",
+                )
+                return
+            except Exception as exc:
+                attempts.append(f"idx={index} {type(exc).__name__}: {exc}")
+                if stream is not None:
+                    try:
+                        stream.close()
+                    except Exception:
+                        pass
+        raise RuntimeError("No pude abrir modo vision nativo. " + " | ".join(attempts))
+
     def _warmup(self, dev: Any) -> None:
         for _ in range(self.warmup_frames):
             dev.read()
@@ -278,6 +364,16 @@ class CameraCapture:
         path.write_bytes(jpeg_bytes)
 
         frame = CameraFrame(path=path, width=img.width, height=img.height, jpeg_bytes=jpeg_bytes)
+        self._last = frame
+        return frame
+
+    def _finalize_jpeg(self, jpeg_bytes: bytes, width: int, height: int, prefix: str) -> CameraFrame:
+        self.cleanup_old()
+        ts = time.strftime("%Y%m%d-%H%M%S")
+        path = self.out_dir / f"{prefix}-{ts}-{int(time.time()*1000) % 1000:03d}.jpg"
+        path.write_bytes(jpeg_bytes)
+
+        frame = CameraFrame(path=path, width=int(width), height=int(height), jpeg_bytes=jpeg_bytes)
         self._last = frame
         return frame
 

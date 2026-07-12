@@ -37,8 +37,8 @@ def test_redact_secrets_masks_api_keys():
 def test_redact_secrets_masks_oauth_tokens():
     text = (
         "SPOTIFY_CLIENT_SECRET=supersecretvalue12345\n"
-        "access_token=abc12345678901234567890\n"
-        "refresh_token: xyz12345678901234567890\n"
+        "access_token=abc12345678901234567890\n"  # gitleaks:allow -- synthetic redaction fixture
+        "refresh_token: xyz12345678901234567890\n"  # gitleaks:allow -- synthetic redaction fixture
         "Authorization: Bearer abcdefghijklmnopqrstuvwxyz123456"
     )
     redacted = redact_secrets(text)

@@ -13,7 +13,8 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from audio.aec import EchoCanceller, AECStream
+from audio.aec import EchoCanceller, AECStream, resample_24k_to_16k
+from audio.native_aec import native_audio_status
 
 
 def _make_echo_path(n: int, far: np.ndarray) -> np.ndarray:
@@ -112,6 +113,39 @@ def test_aecstream_int16_reduce_eco():
     near_f = echo[: len(cleaned)]
     erle = 10 * np.log10(np.mean(near_f[half:] ** 2) / (np.mean(cleaned[half:] ** 2) + 1e-12))
     assert erle > 12.0, f"AECStream ERLE bajo: {erle:.1f} dB"
+
+
+def test_aecstream_puede_forzar_backend_python():
+    stream = AECStream(block=256, partitions=4, native=False)
+    assert stream.backend_name == "python"
+
+
+def test_native_audio_status_no_crashea():
+    status = native_audio_status()
+    assert isinstance(status.available, bool)
+    assert status.detail
+
+
+def test_native_required_falla_claro_si_no_hay_dll(monkeypatch):
+    status = native_audio_status()
+    if status.available:
+        pytest.skip("native audio DLL available on this machine")
+    monkeypatch.setenv("JARVIS_AUDIO_NATIVE", "required")
+    with pytest.raises(Exception):
+        AECStream(block=256, partitions=4)
+
+
+def test_resample_24k_to_16k_python_fallback(monkeypatch):
+    monkeypatch.setenv("JARVIS_AUDIO_NATIVE", "off")
+    sr_in = 24000
+    t = np.arange(sr_in, dtype=np.float32) / sr_in
+    tone = np.sin(2 * np.pi * 440 * t).astype(np.float32)
+
+    out = resample_24k_to_16k(tone)
+
+    assert out.dtype == np.float32
+    assert len(out) == 16000
+    assert np.max(np.abs(out)) > 0.1
 
 
 def test_reset_limpia_estado():

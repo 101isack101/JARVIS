@@ -81,6 +81,8 @@ class ToolContext:
     # Journal vivo de la sesion actual para recuperar continuidad tras
     # reconexiones o compresion de contexto de Gemini Live.
     session_journal: Any | None = None
+    # Runtime durable de misiones read-only. None si la feature no fue construida.
+    agent_runtime: Any | None = None
 
 
 # =====================================================================
@@ -966,6 +968,48 @@ JARVIS_PROACTIVE_CHECK_DECL = types.FunctionDeclaration(
 )
 
 
+JARVIS_TASK_DECL = types.FunctionDeclaration(
+    name="jarvis_task",
+    description=(
+        "Crea, consulta, lista o cancela MISIONES DURABLES read-only de JARVIS. "
+        "Usa action='create' para trabajo de varios pasos que debe continuar en "
+        "background sin bloquear la voz; devuelve mission_id inmediatamente. Usa "
+        "status para consultar progreso/resultado, list para ver misiones recientes y "
+        "cancel para detener una mision. v0 solo puede leer el repositorio JARVIS."
+    ),
+    parameters=types.Schema(
+        type=types.Type.OBJECT,
+        properties={
+            "action": types.Schema(
+                type=types.Type.STRING,
+                description="create | status | list | cancel",
+            ),
+            "goal": types.Schema(
+                type=types.Type.STRING,
+                description="Meta concreta de la mision; requerida para create.",
+            ),
+            "mission_id": types.Schema(
+                type=types.Type.STRING,
+                description="ID msn_*; requerido para status/cancel.",
+            ),
+            "max_steps": types.Schema(
+                type=types.Type.INTEGER,
+                description="Maximo de pasos read-only (1..8). Opcional.",
+            ),
+            "deadline_seconds": types.Schema(
+                type=types.Type.INTEGER,
+                description="Deadline de la mision (30..600 segundos). Opcional.",
+            ),
+            "limit": types.Schema(
+                type=types.Type.INTEGER,
+                description="Cantidad de misiones recientes para list (1..20).",
+            ),
+        },
+        required=["action"],
+    ),
+)
+
+
 def all_function_declarations() -> list[types.FunctionDeclaration]:
     return [
         JARVIS_RECALL_DECL,
@@ -998,6 +1042,7 @@ def all_function_declarations() -> list[types.FunctionDeclaration]:
         SPOTIFY_CONTROL_DECL,
         OBSIDIAN_MCP_DECL,
         JARVIS_PROACTIVE_CHECK_DECL,
+        JARVIS_TASK_DECL,
     ]
 
 
@@ -1967,6 +2012,51 @@ def jarvis_skill(action: str, name: str | None = None) -> dict:
     }
 
 
+def jarvis_task(
+    ctx: ToolContext,
+    action: str,
+    goal: str | None = None,
+    mission_id: str | None = None,
+    max_steps: int | None = None,
+    deadline_seconds: int | None = None,
+    limit: int = 20,
+) -> dict:
+    """API conversacional estrecha para el Agent Runtime durable."""
+    runtime = ctx.agent_runtime
+    if runtime is None:
+        return {
+            "ok": False,
+            "error_code": "AGENT_RUNTIME_UNAVAILABLE",
+            "error": "Agent Runtime no configurado",
+        }
+    op = (action or "").strip().lower()
+    if op == "create":
+        if not (goal or "").strip():
+            return {"ok": False, "error_code": "INVALID_GOAL", "error": "goal requerido"}
+        return runtime.create(
+            goal.strip(),
+            max_steps=max_steps,
+            deadline_seconds=deadline_seconds,
+        )
+    if op == "status":
+        if not (mission_id or "").strip():
+            return {"ok": False, "error_code": "MISSION_ID_REQUIRED", "error": "mission_id requerido"}
+        return runtime.status(mission_id.strip())
+    if op == "cancel":
+        if not (mission_id or "").strip():
+            return {"ok": False, "error_code": "MISSION_ID_REQUIRED", "error": "mission_id requerido"}
+        return runtime.cancel(mission_id.strip())
+    if op == "list":
+        safe_limit = max(1, min(int(limit or 20), 20))
+        return runtime.list(limit=safe_limit)
+    return {
+        "ok": False,
+        "error_code": "INVALID_ACTION",
+        "error": f"accion jarvis_task invalida: {action}",
+        "valid_actions": ["create", "status", "list", "cancel"],
+    }
+
+
 def jarvis_open_url(ctx: ToolContext, url: str | None = None) -> dict:
     if ctx.actions is None:
         return {"executed": False, "error": "SafeActionExecutor no configurado"}
@@ -2503,6 +2593,7 @@ class ToolDispatcher:
             },
             "obsidian_mcp": lambda **kw: obsidian_mcp(ctx, **kw),
             "jarvis_proactive_check": lambda **kw: jarvis_proactive_check(ctx, **kw),
+            "jarvis_task": lambda **kw: jarvis_task(ctx, **kw),
         }
         # Tools que tienen version async (devuelven coroutine awaitable).
         # El dispatcher async las invoca directamente sobre el event loop

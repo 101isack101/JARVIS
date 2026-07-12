@@ -103,7 +103,7 @@ def test_semantic_index_search_returns_metadata_and_redacts(tmp_path):
             source_uri="claude_memory:project_polymath.md",
             path="project_polymath.md",
             title="Polymath memory",
-            text="Polymath IDE decision: usar FAISS. SECRET_TOKEN=abc12345678901234567890",
+            text="Polymath IDE decision: usar FAISS. SECRET_TOKEN=abc12345678901234567890",  # gitleaks:allow -- filter fixture
             project="Polymath IDE",
             confidence="high",
         ),

@@ -1,0 +1,10 @@
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Generated local artifacts; real source and Git history remain scanned"
+paths = [
+  '''(^|[\\/])desktop[\\/]src-tauri[\\/]target[\\/]''',
+  '''(^|[\\/])__pycache__[\\/]''',
+  '''(^|[\\/])data[\\/]spotify[\\/]\.cache$''',
+]

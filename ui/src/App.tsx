@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type { CSSProperties, RefObject } from 'react'
 import {
-  Bot, Camera, CirclePower, Cloud, Clock3, Download, Keyboard, MemoryStick,
+  Bot, Camera, CirclePower, Cloud, Clock3, Download, Gauge, Keyboard, MemoryStick,
   Mic, Power, RefreshCcw, Settings, Thermometer, Trash2, Wifi, X,
 } from 'lucide-react'
 import ReactMarkdown from 'react-markdown'
@@ -10,8 +10,9 @@ import './index.css'
 import { useJarvis } from './useJarvis'
 import ApprovalModal from './components/ApprovalModal'
 import type {
-  AgentToolEvent, AudioTelemetry, JarvisMode, JarvisState, LogEvent,
-  SystemStats as SystemStatsData, Weather,
+  AgentToolEvent, AudioTelemetry, BudgetPayload, JarvisMode, JarvisState, LogEvent,
+  ConversationMessage, RuntimeTelemetry, SystemStats as SystemStatsData, Weather,
+  MissionSummary,
 } from './types'
 
 const STATE_LABEL: Record<JarvisState, string> = {
@@ -62,6 +63,56 @@ function formatDuration(ms: number) {
   return `${h}:${m}:${s}`
 }
 
+function fileStamp(date = new Date()) {
+  const yyyy = date.getFullYear()
+  const mm = String(date.getMonth() + 1).padStart(2, '0')
+  const dd = String(date.getDate()).padStart(2, '0')
+  const hh = String(date.getHours()).padStart(2, '0')
+  const mi = String(date.getMinutes()).padStart(2, '0')
+  const ss = String(date.getSeconds()).padStart(2, '0')
+  return `${yyyy}${mm}${dd}-${hh}${mi}${ss}`
+}
+
+function buildConversationMarkdown(
+  messages: ConversationMessage[],
+  inputTranscript: string,
+  outputTranscript: string,
+) {
+  const fallbackCount = inputTranscript.trim() || outputTranscript.trim() ? 2 : 0
+  const lines = [
+    '# Conversacion JARVIS',
+    '',
+    `Extraida: ${new Date().toLocaleString()}`,
+    `Mensajes: ${messages.length || fallbackCount}`,
+    '',
+  ]
+
+  if (messages.length) {
+    for (const message of messages) {
+      const who = message.role === 'user' ? 'Isaac' : 'JARVIS'
+      lines.push(`## ${who} - ${message.stamp || 'sin hora'}`, '', message.text.trim(), '')
+    }
+  } else {
+    if (inputTranscript.trim()) lines.push('## Isaac', '', inputTranscript.trim(), '')
+    if (outputTranscript.trim()) lines.push('## JARVIS', '', outputTranscript.trim(), '')
+  }
+
+  return lines.join('\n').trim() + '\n'
+}
+
+function downloadTextFile(filename: string, text: string) {
+  const blob = new Blob([text], { type: 'text/markdown;charset=utf-8' })
+  const url = URL.createObjectURL(blob)
+  const link = document.createElement('a')
+  link.href = url
+  link.download = filename
+  link.rel = 'noopener'
+  document.body.appendChild(link)
+  link.click()
+  link.remove()
+  window.setTimeout(() => URL.revokeObjectURL(url), 1000)
+}
+
 function Panel({ title, icon: Icon, action, children }: {
   title: string
   icon: typeof Bot
@@ -109,6 +160,14 @@ function ProgressLine({ label, value, suffix = '%' }: { label: string; value: nu
   )
 }
 
+function money(value: number, digits = 4) {
+  return `$${value.toFixed(digits)}`
+}
+
+function rate(value: number, digits = 4) {
+  return `${money(value, digits)}/min`
+}
+
 function RefreshButton({ onClick }: { onClick: () => void }) {
   return (
     <button className="hud-refresh-button" type="button" title="Refresh" aria-label="Refresh" onClick={onClick}>
@@ -140,6 +199,108 @@ function SystemStats({ stats, state, events, tools, onRefresh }: {
         <div><span>CPU</span><strong>{cpu}%</strong></div>
         <div><span>Memory</span><strong>{ram}%</strong></div>
         <div><span>Disk</span><strong>{diskLabel}</strong></div>
+      </div>
+    </Panel>
+  )
+}
+
+const TERMINAL_MISSION = new Set(['completed', 'cancelled', 'blocked', 'failed'])
+
+function MissionPanel({ missions, onCancel }: {
+  missions: MissionSummary[]
+  onCancel: (missionId: string) => void
+}) {
+  const recent = [...missions].reverse().slice(0, 3)
+  return (
+    <Panel title="Missions" icon={Bot} action={<span className="hud-mission-count">{missions.length}</span>}>
+      {!recent.length && <div className="hud-mission-empty">Sin misiones activas</div>}
+      <div className="hud-mission-list">
+        {recent.map(mission => {
+          const total = Math.max(0, mission.total_steps)
+          const progress = total ? Math.round(mission.completed_steps * 100 / total) : 0
+          const cancellable = !TERMINAL_MISSION.has(mission.status)
+          return (
+            <article className={`hud-mission hud-mission-${mission.status}`} key={mission.id}>
+              <div className="hud-mission-topline">
+                <span>{mission.status.replace('_', ' ')}</span>
+                <b>{mission.completed_steps}/{total || 'â€”'}</b>
+                {cancellable && (
+                  <button type="button" title="Cancelar misión" onClick={() => onCancel(mission.id)}>
+                    <X size={12} />
+                  </button>
+                )}
+              </div>
+              <p title={mission.goal}>{mission.goal}</p>
+              <div className="hud-mission-track"><i style={{ width: `${progress}%` }} /></div>
+              {mission.error_code && <small>{mission.error_code}</small>}
+            </article>
+          )
+        })}
+      </div>
+    </Panel>
+  )
+}
+
+function TelemetryPanel({ telemetry, budget }: {
+  telemetry: RuntimeTelemetry | null
+  budget: BudgetPayload | null
+}) {
+  const geminiTokens = telemetry?.gemini.tokensLabel ?? budget?.gemini.tokensLabel ?? '0'
+  const claudeTokens = telemetry?.claude.tokensLabel ?? budget?.claude.tokensLabel ?? '0'
+  const totalUsd = telemetry?.totalUsd ?? budget?.totalUsd ?? 0
+  const totalTokens = telemetry?.totalTokensLabel ?? '0'
+  const camera = telemetry?.camera
+
+  return (
+    <Panel
+      title="Telemetría"
+      icon={Gauge}
+      action={<span className="hud-clock-mini">{telemetry?.stamp ?? '—'}</span>}
+    >
+      <div className="hud-telemetry-summary">
+        <div>
+          <span>Session cost</span>
+          <strong>{money(totalUsd)}</strong>
+          <small>{rate(telemetry?.totalUsdPerMin ?? 0)}</small>
+        </div>
+        <div>
+          <span>Tokens</span>
+          <strong>{totalTokens}</strong>
+          <small>{Math.round(telemetry?.totalTokensPerMin ?? 0)}/min</small>
+        </div>
+      </div>
+
+      <div className="hud-telemetry-rows">
+        <div className="hud-telemetry-row">
+          <span>Gemini</span>
+          <strong>{geminiTokens}</strong>
+          <b>{money(telemetry?.gemini.costUsd ?? budget?.gemini.spentUsd ?? 0, 5)}</b>
+          <em>{rate(telemetry?.gemini.usdPerMin ?? 0, 5)}</em>
+        </div>
+        <div className="hud-telemetry-row">
+          <span>Claude</span>
+          <strong>{claudeTokens}</strong>
+          <b>{money(telemetry?.claude.costUsd ?? budget?.claude.spentUsd ?? 0, 5)}</b>
+          <em>{rate(telemetry?.claude.usdPerMin ?? 0, 5)}</em>
+        </div>
+      </div>
+
+      <div className="hud-telemetry-camera">
+        <div>
+          <span>Vision stream</span>
+          <strong>{(camera?.streamFps ?? 0).toFixed(1)} FPS</strong>
+          <small>{(camera?.streamKbps ?? 0).toFixed(1)} KB/s</small>
+        </div>
+        <div>
+          <span>Preview</span>
+          <strong>{(camera?.previewFps ?? 0).toFixed(1)} FPS</strong>
+          <small>{(camera?.previewKbps ?? 0).toFixed(1)} KB/s</small>
+        </div>
+        <div>
+          <span>Data</span>
+          <strong>{(camera?.streamMb ?? 0).toFixed(2)} MB</strong>
+          <small>{(camera?.avgFrameKb ?? 0).toFixed(1)} KB/frame</small>
+        </div>
       </div>
     </Panel>
   )
@@ -270,17 +431,22 @@ function CoreOrb({ state, audioTelemetry }: { state: JarvisState; audioTelemetry
   )
 }
 
-function Conversation({ input, output, onClear, onExtract, onSend, inputRef, canSend }: {
-  input: string
-  output: string
+function Conversation({ messages, onClear, onExtract, onSend, inputRef, canSend, extractLabel }: {
+  messages: ConversationMessage[]
   onClear: () => void
   onExtract: () => void
   onSend: (text: string) => void
   inputRef: RefObject<HTMLInputElement | null>
   canSend: boolean
+  extractLabel: string
 }) {
-  const hasContent = input || output
+  const hasContent = messages.length > 0
   const [draft, setDraft] = useState('')
+  const bottomRef = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    bottomRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' })
+  }, [messages])
 
   const submit = () => {
     const text = draft.trim()
@@ -292,34 +458,58 @@ function Conversation({ input, output, onClear, onExtract, onSend, inputRef, can
   return (
     <aside className="hud-conversation">
       <header className="hud-conversation-header">
-        <span>Conversation</span>
+        <span>Conversación</span>
         <div>
-          <button type="button" onClick={onClear}><Trash2 size={13} />Clear</button>
-          <button type="button" onClick={onExtract}><Download size={13} />Extract Conversation</button>
+          <button type="button" onClick={onClear}><Trash2 size={13} />Limpiar</button>
+          <button type="button" onClick={onExtract}><Download size={13} />{extractLabel}</button>
         </div>
       </header>
       <div className="hud-conversation-feed">
         {hasContent ? (
           <>
-            {input && (
-              <div className="hud-message hud-message-user">
-                <span>Isaac</span>
-                <p>{input}</p>
-              </div>
-            )}
-            {output && (
-              <div className="hud-message hud-message-jarvis">
-                <span>JARVIS</span>
-                <ReactMarkdown remarkPlugins={[remarkGfm]}>{output}</ReactMarkdown>
-              </div>
-            )}
+            {messages.map((message) => {
+              const isUser = message.role === 'user'
+              return (
+                <div
+                  key={message.id}
+                  className={`hud-message-row ${isUser ? 'hud-message-row-user' : 'hud-message-row-jarvis'}`}
+                >
+                  <article
+                    className={`hud-message ${isUser ? 'hud-message-user' : 'hud-message-jarvis'}`}
+                    aria-label={isUser ? 'Ventana de texto de Isaac' : 'Ventana de texto de JARVIS'}
+                  >
+                    <header className="hud-message-meta">
+                      <span className="hud-message-title">{isUser ? 'Isaac' : 'JARVIS'}</span>
+                      <small>{isUser ? 'Ventana de texto' : 'Ventana de respuesta'} | {message.stamp}</small>
+                    </header>
+                    {isUser ? (
+                      <div className="hud-message-body">
+                        <p>{message.text}</p>
+                      </div>
+                    ) : (
+                      <div className="hud-message-body hud-message-markdown">
+                        <ReactMarkdown remarkPlugins={[remarkGfm]}>{message.text}</ReactMarkdown>
+                      </div>
+                    )}
+                  </article>
+                </div>
+              )
+            })}
           </>
         ) : (
-          <div className="hud-message hud-message-jarvis">
-            <span>JARVIS</span>
-            <p>Hello, I am JARVIS. How can I assist you today, sir?</p>
+          <div className="hud-message-row hud-message-row-jarvis">
+            <article className="hud-message hud-message-jarvis" aria-label="Ventana de texto de JARVIS">
+              <header className="hud-message-meta">
+                <span className="hud-message-title">JARVIS</span>
+                <small>Ventana de respuesta</small>
+              </header>
+              <div className="hud-message-body">
+                <p>Hello, I am JARVIS. How can I assist you today, sir?</p>
+              </div>
+            </article>
           </div>
         )}
+        <div ref={bottomRef} />
       </div>
       <form
         className="hud-input-row"
@@ -462,6 +652,7 @@ export default function App() {
   const { now, uptimeMs } = useClock()
   const inputRef = useRef<HTMLInputElement>(null)
   const [settingsOpen, setSettingsOpen] = useState(false)
+  const [extractLabel, setExtractLabel] = useState('Extraer conversacion')
   const connected = ui.connectionStatus === 'connected'
   const commands = useMemo(
     () => ui.agentTools.filter(t => t.status !== 'running').length,
@@ -484,9 +675,41 @@ export default function App() {
 
   const clearConversation = () => dispatch('clearTranscripts')
 
-  const extractConversation = () => {
-    const text = [`Isaac:\n${ui.inputTranscript}`, `JARVIS:\n${ui.outputTranscript}`].join('\n\n')
-    void navigator.clipboard?.writeText(text)
+  const extractConversation = async () => {
+    const text = buildConversationMarkdown(
+      ui.conversationMessages,
+      ui.inputTranscript,
+      ui.outputTranscript,
+    )
+    const hasContent = ui.conversationMessages.length > 0
+      || ui.inputTranscript.trim().length > 0
+      || ui.outputTranscript.trim().length > 0
+    if (!hasContent) {
+      setExtractLabel('Sin contenido')
+      window.setTimeout(() => setExtractLabel('Extraer conversacion'), 1800)
+      return
+    }
+
+    try {
+      if (ui.uiToken) {
+        try {
+          await sendCommand('extractConversation', ui.uiToken)
+        } catch {
+          // La descarga local sigue funcionando aunque el bridge no responda.
+        }
+      }
+      downloadTextFile(`jarvis-conversation-${fileStamp()}.md`, text)
+      try {
+        await navigator.clipboard?.writeText(text)
+      } catch {
+        // La descarga es la extraccion principal; clipboard es solo extra.
+      }
+      setExtractLabel('Descargada')
+    } catch {
+      setExtractLabel('Error')
+    } finally {
+      window.setTimeout(() => setExtractLabel('Extraer conversacion'), 2200)
+    }
   }
 
   const sendText = (text: string) => dispatch('sendText', { text })
@@ -494,6 +717,7 @@ export default function App() {
   const toggleCamera = () => dispatch('toggleCamera')
   const refreshStats = () => dispatch('refreshStats')
   const refreshWeather = () => dispatch('refreshWeather')
+  const cancelMission = (missionId: string) => dispatch('cancelMission', { missionId })
   const shutdown = () => { dispatch('close'); setSettingsOpen(false) }
   const focusInput = () => inputRef.current?.focus()
 
@@ -519,16 +743,18 @@ export default function App() {
             tools={ui.agentTools}
             onRefresh={refreshStats}
           />
+          <MissionPanel missions={ui.missions} onCancel={cancelMission} />
+          <TelemetryPanel telemetry={ui.runtimeTelemetry} budget={ui.budget} />
           <WeatherPanel weather={ui.weather} onRefresh={refreshWeather} />
           <CameraWidget active={ui.cameraActive} frame={ui.cameraFrame} focus={ui.cameraFocus} />
           <UptimePanel uptimeMs={uptimeMs} commands={commands} />
         </aside>
         <CoreOrb state={ui.state} audioTelemetry={ui.audioTelemetry} />
         <Conversation
-          input={ui.inputTranscript}
-          output={ui.outputTranscript}
+          messages={ui.conversationMessages}
           onClear={clearConversation}
           onExtract={extractConversation}
+          extractLabel={extractLabel}
           onSend={sendText}
           inputRef={inputRef}
           canSend={connected}

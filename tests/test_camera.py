@@ -1,9 +1,11 @@
 import sys
 from pathlib import Path
+import struct
 
 import pytest
 
 from vision.camera import CameraCapture, CameraFrame
+from vision.native_capture import native_vision_status
 
 
 class FakeDevice:
@@ -119,3 +121,35 @@ def test_camera_look_during_watch_reports_clear_error(tmp_path):
     assert out["captured"] is False
     assert out["active"] is True
     assert "Modo vision activo" in out["error"]
+
+
+def test_native_vision_status_no_crashea():
+    status = native_vision_status()
+    assert isinstance(status.available, bool)
+    assert status.path
+
+
+def test_native_vision_required_falla_claro_si_no_hay_exe(tmp_path, monkeypatch):
+    monkeypatch.setenv("JARVIS_VISION_NATIVE", "required")
+    monkeypatch.setenv("JARVIS_VISION_NATIVE_EXE", str(tmp_path / "missing.exe"))
+    monkeypatch.setenv("JARVIS_CAMERA_INDEX", "0")
+
+    cam = CameraCapture(out_dir=tmp_path)
+
+    with pytest.raises(RuntimeError) as err:
+        cam.capture()
+    assert "Vision nativa requerida" in str(err.value)
+
+
+def test_native_vision_protocol_reader():
+    import io
+    from vision import native_capture
+
+    jpeg = b"\xff\xd8\xff_fake_jpeg"
+    payload = struct.pack("<4sIIIQ", b"JVF1", 320, 240, len(jpeg), 123) + jpeg
+    frame = native_capture._read_frame(io.BytesIO(payload), timeout_s=1.0)
+
+    assert frame.width == 320
+    assert frame.height == 240
+    assert frame.jpeg_bytes == jpeg
+    assert frame.timestamp_ns == 123

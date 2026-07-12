@@ -198,7 +198,8 @@ button {
   flex-direction: column;
   gap: 12px;
   min-height: 0;
-  overflow: hidden;
+  overflow-y: auto;
+  padding-right: 2px;
 }
 
 .hud-panel {
@@ -258,6 +259,100 @@ button {
 .hud-panel-body {
   padding: 11px 12px;
 }
+
+.hud-mission-count {
+  min-width: 22px;
+  padding: 2px 7px;
+  border: 1px solid rgba(105, 227, 242, 0.22);
+  border-radius: 999px;
+  color: #9af0f1;
+  font: 800 10px var(--font-mono);
+  text-align: center;
+}
+
+.hud-mission-empty {
+  color: #648b94;
+  font: 700 11px var(--font-mono);
+  text-align: center;
+}
+
+.hud-mission-list {
+  display: grid;
+  gap: 8px;
+}
+
+.hud-mission {
+  padding: 8px 9px;
+  border: 1px solid rgba(116, 223, 225, 0.12);
+  border-radius: 8px;
+  background: rgba(4, 14, 16, 0.56);
+}
+
+.hud-mission-topline {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  color: #77dfe7;
+  font: 900 9px var(--font-mono);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.hud-mission-topline b {
+  margin-left: auto;
+  color: #9ebbc2;
+}
+
+.hud-mission-topline button {
+  width: 18px;
+  height: 18px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid rgba(236, 124, 112, 0.18);
+  border-radius: 5px;
+  color: #c77d73;
+  background: transparent;
+}
+
+.hud-mission p {
+  margin: 6px 0;
+  overflow: hidden;
+  color: #bdd4d9;
+  font-size: 10px;
+  line-height: 1.3;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.hud-mission-track {
+  height: 3px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: rgba(80, 120, 128, 0.22);
+}
+
+.hud-mission-track i {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, #4dcbd5, #66dca2);
+  transition: width 220ms ease;
+}
+
+.hud-mission small {
+  display: block;
+  margin-top: 5px;
+  overflow: hidden;
+  color: #df8b7d;
+  font: 700 9px var(--font-mono);
+  text-overflow: ellipsis;
+}
+
+.hud-mission-completed .hud-mission-topline { color: #69dfa0; }
+.hud-mission-blocked .hud-mission-topline,
+.hud-mission-failed .hud-mission-topline { color: #e88a7d; }
+.hud-mission-cancelled .hud-mission-topline { color: #7f969c; }
 
 .hud-progress-row {
   margin-bottom: 10px;
@@ -322,6 +417,103 @@ button {
   color: #75e8dc;
   font-family: var(--font-mono);
   font-size: 12px;
+}
+
+.hud-telemetry-summary {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 7px;
+}
+
+.hud-telemetry-summary > div,
+.hud-telemetry-camera > div {
+  min-width: 0;
+  padding: 8px 9px;
+  border-radius: 8px;
+  background: rgba(7, 15, 17, 0.58);
+  border: 1px solid rgba(116, 223, 225, 0.1);
+}
+
+.hud-telemetry-summary span,
+.hud-telemetry-camera span {
+  display: block;
+  color: #4e98aa;
+  font-size: 9px;
+  font-weight: 900;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.hud-telemetry-summary strong,
+.hud-telemetry-camera strong {
+  display: block;
+  margin-top: 4px;
+  color: #75e8dc;
+  font-family: var(--font-mono);
+  font-size: 14px;
+  font-weight: 900;
+  white-space: nowrap;
+}
+
+.hud-telemetry-summary small,
+.hud-telemetry-camera small {
+  display: block;
+  margin-top: 2px;
+  color: #8db4b4;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 800;
+  white-space: nowrap;
+}
+
+.hud-telemetry-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  margin-top: 8px;
+}
+
+.hud-telemetry-row {
+  min-height: 28px;
+  display: grid;
+  grid-template-columns: 54px minmax(48px, 1fr) minmax(68px, 1fr) minmax(72px, 1fr);
+  align-items: center;
+  gap: 8px;
+  padding: 6px 9px;
+  border-radius: 8px;
+  background: rgba(5, 12, 14, 0.46);
+  border: 1px solid rgba(116, 223, 225, 0.08);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 800;
+}
+
+.hud-telemetry-row span {
+  color: #66c9d6;
+}
+
+.hud-telemetry-row strong {
+  color: #d4eef4;
+  white-space: nowrap;
+}
+
+.hud-telemetry-row b {
+  color: #84f0c2;
+  font-weight: 900;
+  white-space: nowrap;
+}
+
+.hud-telemetry-row em {
+  color: #8db4b4;
+  font-style: normal;
+  white-space: nowrap;
+}
+
+.hud-telemetry-camera {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 7px;
+  margin-top: 8px;
 }
 
 .hud-weather {
@@ -733,48 +925,164 @@ button {
 .hud-conversation-feed {
   flex: 1;
   min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 15px;
   overflow-y: auto;
-  padding: 16px;
+  padding: 16px 18px 18px;
+}
+
+.hud-message-row {
+  width: 100%;
+  display: flex;
+}
+
+.hud-message-row-user {
+  justify-content: flex-end;
+  padding-left: 72px;
+}
+
+.hud-message-row-jarvis {
+  justify-content: flex-start;
+  padding-right: 48px;
 }
 
 .hud-message {
-  width: fit-content;
-  max-width: 82%;
-  margin-bottom: 14px;
-  padding: 14px 16px;
-  border: 1px solid rgba(77, 205, 239, 0.13);
-  border-radius: 14px;
+  position: relative;
+  width: 100%;
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
+  border-radius: 12px;
   color: #d5edf2;
-  background:
-    linear-gradient(135deg, rgba(31, 76, 80, 0.92), rgba(12, 34, 38, 0.94));
-  box-shadow: inset 0 0 18px rgba(228, 200, 121, 0.035);
+  border: 1px solid rgba(77, 205, 239, 0.13);
+  box-shadow:
+    inset 0 0 18px rgba(228, 200, 121, 0.035),
+    0 10px 24px rgba(0, 0, 0, 0.24);
 }
 
 .hud-message-user {
-  margin-left: auto;
-  background: linear-gradient(135deg, rgba(31, 67, 73, 0.9), rgba(23, 42, 52, 0.92));
+  max-width: 78%;
+  background:
+    linear-gradient(135deg, rgba(35, 73, 82, 0.92), rgba(21, 40, 52, 0.94));
+  border-color: rgba(105, 227, 242, 0.2);
 }
 
-.hud-message span {
-  display: block;
-  margin-bottom: 8px;
+.hud-message-jarvis {
+  max-width: 84%;
+  background:
+    linear-gradient(135deg, rgba(24, 82, 77, 0.94), rgba(8, 35, 39, 0.96));
+  border-color: rgba(107, 230, 167, 0.2);
+}
+
+.hud-message-user::before,
+.hud-message-jarvis::before {
+  content: "";
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 3px;
+  opacity: 0.8;
+}
+
+.hud-message-user::before {
+  left: auto;
+  right: 0;
+  background: linear-gradient(180deg, #69e3f2, #e4c879);
+}
+
+.hud-message-jarvis::before {
+  background: linear-gradient(180deg, #6be6a7, #51d7e8);
+}
+
+.hud-message-meta {
+  min-height: 34px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 16px 8px;
+  border-bottom: 1px solid rgba(116, 223, 225, 0.08);
+}
+
+.hud-message-title {
+  display: inline-flex;
+  align-items: center;
   color: #8bf0e2;
   font-size: 11px;
   font-weight: 900;
   letter-spacing: 0.08em;
 }
 
+.hud-message-meta small {
+  color: rgba(141, 180, 180, 0.72);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+}
+
+.hud-message-user .hud-message-meta {
+  text-align: right;
+}
+
+.hud-message-user .hud-message-title {
+  color: #9cf5ff;
+}
+
+.hud-message-jarvis .hud-message-title {
+  color: #84f0c2;
+}
+
+.hud-message-body {
+  padding: 11px 16px 14px;
+}
+
 .hud-message p,
-.hud-message li {
+.hud-message li,
+.hud-message-body {
   color: #d4eef4;
   font-size: 13px;
   font-weight: 700;
   line-height: 1.55;
+  overflow-wrap: anywhere;
+}
+
+.hud-message p {
+  white-space: pre-wrap;
+}
+
+.hud-message-markdown p {
+  margin: 0 0 9px;
+}
+
+.hud-message-markdown p:last-child {
+  margin-bottom: 0;
 }
 
 .hud-message ul,
 .hud-message ol {
-  padding-left: 18px;
+  padding-left: 20px;
+  margin: 8px 0;
+}
+
+.hud-message code {
+  padding: 1px 5px;
+  border-radius: 5px;
+  color: #9cf5ff;
+  background: rgba(5, 12, 14, 0.72);
+  font-family: var(--font-mono);
+  font-size: 0.92em;
+}
+
+.hud-message pre {
+  max-width: 100%;
+  overflow-x: auto;
+  margin: 10px 0;
+  padding: 11px 12px;
+  border-radius: 8px;
+  background: rgba(3, 10, 12, 0.78);
+  border: 1px solid rgba(116, 223, 225, 0.11);
 }
 
 .hud-input-row {

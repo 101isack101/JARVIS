@@ -2,6 +2,14 @@ export type JarvisState = 'idle' | 'listening' | 'thinking' | 'speaking' | 'bloc
 export type JarvisMode = 'PTT' | 'LIBRE'
 export type ConnectionStatus = 'connecting' | 'connected' | 'disconnected'
 export type LogLevel = 'ok' | 'warn' | 'error' | 'info'
+export type ConversationRole = 'user' | 'jarvis'
+
+export interface ConversationMessage {
+  id: string
+  role: ConversationRole
+  text: string
+  stamp: string
+}
 
 export interface LogEvent {
   stamp: string
@@ -53,6 +61,71 @@ export interface AudioTelemetry {
   stamp?: string
 }
 
+export type MissionStatus =
+  | 'queued' | 'planning' | 'ready' | 'running' | 'verifying'
+  | 'cancel_requested' | 'recovering'
+  | 'completed' | 'cancelled' | 'blocked' | 'failed'
+
+export interface MissionSummary {
+  id: string
+  goal: string
+  status: MissionStatus
+  autonomy_level: 'L1' | string
+  created_at: string
+  updated_at: string
+  finished_at: string | null
+  completed_steps: number
+  total_steps: number
+  error_code: string | null
+  final_summary: string | null
+}
+
+export interface MissionEvent {
+  id: number | null
+  mission_id: string
+  step_id: string | null
+  event_type: string
+  level: LogLevel
+  payload: Record<string, unknown>
+  created_at: string
+}
+
+export interface ProviderRuntimeTelemetry {
+  tokens: number
+  tokensLabel: string
+  costUsd: number
+  tokensPerMin: number
+  usdPerMin: number
+}
+
+export interface CameraRuntimeTelemetry {
+  active: boolean
+  streamFps: number
+  streamKbps: number
+  previewFps: number
+  previewKbps: number
+  streamFrames: number
+  previewFrames: number
+  streamMb: number
+  previewMb: number
+  avgFrameKb: number
+}
+
+export interface RuntimeTelemetry {
+  stamp: string
+  windowS: number
+  cameraWindowS: number
+  totalTokens: number
+  totalTokensLabel: string
+  totalUsd: number
+  totalTokensPerMin: number
+  totalUsdPerMin: number
+  gemini: ProviderRuntimeTelemetry
+  claude: ProviderRuntimeTelemetry
+  other: ProviderRuntimeTelemetry
+  camera: CameraRuntimeTelemetry
+}
+
 export interface SystemStats {
   cpu: number
   ram: number
@@ -90,11 +163,15 @@ export interface JarvisSnapshot {
   privacy: string
   inputTranscript: string
   outputTranscript: string
+  conversationMessages?: ConversationMessage[]
   events: LogEvent[]
   memory: MemoryStats
   budget: BudgetPayload
   agentEvents: AgentToolEvent[]
+  missions?: MissionSummary[]
+  missionEvents?: MissionEvent[]
   audioTelemetry: AudioTelemetry | null
+  runtimeTelemetry?: RuntimeTelemetry | null
   latency: string[]
   cameraActive?: boolean
   cameraFrame?: string | null

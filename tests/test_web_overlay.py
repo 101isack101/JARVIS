@@ -1,9 +1,11 @@
-from telemetry.budgets import BudgetStatus, ProviderBudget
+from telemetry.budgets import BudgetGate, BudgetStatus, ProviderBudget
+from telemetry.tracker import TokenTracker
 from types import SimpleNamespace
 from overlay.web_overlay import (
     WebJarvisOverlay,
     _BridgeHandler,
     _audio_emit_interval_from_env,
+    _camera_emit_interval_from_env,
     _provider_payload,
     resolve_web_dir,
 )
@@ -50,6 +52,18 @@ def test_audio_visual_interval_defaults_to_30_fps(monkeypatch):
     assert _audio_emit_interval_from_env() == 1 / 30
 
 
+def test_camera_preview_interval_uses_camera_fps(monkeypatch):
+    monkeypatch.delenv("JARVIS_CAMERA_PREVIEW_FPS", raising=False)
+    monkeypatch.setenv("JARVIS_CAMERA_FPS", "10.0")
+    assert _camera_emit_interval_from_env() == 0.1
+
+    monkeypatch.setenv("JARVIS_CAMERA_PREVIEW_FPS", "20")
+    assert _camera_emit_interval_from_env() == 1 / 15
+
+    monkeypatch.setenv("JARVIS_CAMERA_PREVIEW_FPS", "invalid")
+    assert _camera_emit_interval_from_env() == 0.25
+
+
 def test_resolve_web_dir_honors_env_override(tmp_path, monkeypatch):
     web_dir = tmp_path / "ui"
     web_dir.mkdir()
@@ -70,3 +84,48 @@ def test_bridge_post_authorization_requires_session_token():
 
     handler.headers = {"X-Jarvis-Ui-Token": "secret-token"}
     assert handler._authorized({}) is True
+
+
+def test_export_conversation_writes_markdown(tmp_path, monkeypatch):
+    from tests.test_web_overlay_headless import _make_overlay
+
+    monkeypatch.setenv("JARVIS_CONVERSATION_EXPORT_DIR", str(tmp_path))
+    overlay = _make_overlay()
+    try:
+        overlay.append_input("Hola Jarvis")
+        overlay.append_output("Hola Isaac")
+
+        path = overlay.export_conversation()
+
+        assert path is not None
+        assert path.parent == tmp_path
+        text = path.read_text(encoding="utf-8")
+        assert "# Conversacion JARVIS" in text
+        assert "## Isaac" in text
+        assert "Hola Jarvis" in text
+        assert "## JARVIS" in text
+        assert "Hola Isaac" in text
+    finally:
+        overlay.close()
+
+
+def test_runtime_telemetry_reports_cost_tokens_and_camera_bandwidth(monkeypatch):
+    monkeypatch.setenv("JARVIS_WEB_UI_PORT", "0")
+    monkeypatch.setenv("JARVIS_WEB_UI_OPEN_BROWSER", "false")
+    overlay = WebJarvisOverlay(TokenTracker(), BudgetGate())
+    try:
+        overlay.tracker.record("gemini-3.1-flash-live-preview:text-in", input_tokens=1200)
+        overlay.tracker.record("claude-sonnet-4-6", output_tokens=200)
+        overlay.update_camera_preview(SimpleNamespace(jpeg_bytes=b"x" * 4096))
+
+        payload = overlay._runtime_telemetry_payload()
+
+        assert payload["totalTokens"] >= 1400
+        assert payload["totalUsd"] > 0
+        assert payload["gemini"]["tokens"] >= 1200
+        assert payload["claude"]["tokens"] >= 200
+        assert payload["camera"]["streamFrames"] == 1
+        assert payload["camera"]["streamKbps"] > 0
+        assert payload["camera"]["streamMb"] > 0
+    finally:
+        overlay.close()

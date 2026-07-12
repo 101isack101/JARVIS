@@ -37,6 +37,7 @@ sys.path.insert(0, str(ROOT))
 
 # Local imports
 from actions.executor import SafeActionExecutor
+from agent_runtime.runtime import AgentRuntimeConfig, build_agent_runtime
 from audio.capture import AudioCapture
 from audio.playback import AudioPlayer
 from audio.aec import AECStream, resample_24k_to_16k
@@ -364,6 +365,8 @@ class Jarvis:
             if self._aec_enabled
             else None
         )
+        if self._aec is not None:
+            log.info(f"AEC backend activo: {getattr(self._aec, 'backend_name', 'python')}")
         # Pico de ERLE (dB de eco cancelado) del turno hablado, para diagnostico.
         self._aec_erle_peak = 0.0
 
@@ -378,9 +381,11 @@ class Jarvis:
         self.screen = ScreenCapture(ROOT / "data" / "screenshots")
         from vision.camera import CameraCapture
         self.camera = CameraCapture(ROOT / "data" / "camera")
+        log.info(f"Vision backend configurado: {getattr(self.camera, 'backend_name', 'opencv')}")
         self.preferences = ensure_runtime_preferences(ROOT / "data" / "preferences.json")
         self.reasoner = self._build_reasoner()
         self.code_reasoner = self._build_code_reasoner()
+        self.agent_runtime = None
         self._prewarm_reasoner_clients()
         self.obsidian_mcp = ObsidianMCPClient(python_exe=sys.executable, cwd=ROOT)
 
@@ -566,6 +571,7 @@ class Jarvis:
             retrieval_curator=self.retrieval_curator,
             write_critique_enabled=KnowledgeImproverConfig.from_env().write_critique_enabled,
             session_journal=self.session_journal,
+            agent_runtime=None,
         )
         self.dispatcher = ToolDispatcher(self.tool_ctx)
         self.indexer = IncrementalIndexer(
@@ -599,6 +605,26 @@ class Jarvis:
                 lambda: self.overlay.show_approval(action, self.approvals.resolve)
             )
         )
+
+        # Misiones durables read-only: separadas del turno de voz y apagadas por default.
+        try:
+            agent_cfg = AgentRuntimeConfig.from_env()
+            self.agent_runtime = build_agent_runtime(
+                root=ROOT,
+                reasoner=self.code_reasoner,
+                executor=self.actions,
+                config=agent_cfg,
+                event_sink=self._on_agent_runtime_event,
+            )
+            self.tool_ctx.agent_runtime = self.agent_runtime
+            setter = getattr(self.overlay, "set_missions", None)
+            if callable(setter):
+                setter(self.agent_runtime.list(limit=20).get("missions", []))
+            if agent_cfg.enabled:
+                log.info("Agent Runtime v0 configurado (L1 read-only)")
+        except Exception as exc:
+            self.agent_runtime = None
+            log.warning(f"[WARN] Agent Runtime no pudo inicializarse: {type(exc).__name__}: {exc}")
 
         # Modo: 'PTT' (default) o 'LIBRE'
         self.mode = "PTT"
@@ -721,6 +747,8 @@ class Jarvis:
         self.player.start()
         self.capture.start()
         self.indexer.start()
+        if self.agent_runtime is not None and self.agent_runtime.config.enabled:
+            self.agent_runtime.start()
         self.session.start()
         self.hotkey_listener.start()
         self.overlay.set_state("idle")
@@ -746,6 +774,11 @@ class Jarvis:
                 self.camera_watch.stop()
         except Exception:
             pass
+        try:
+            if self.agent_runtime is not None:
+                self.agent_runtime.stop(timeout_s=3.0)
+        except Exception as exc:
+            self._log(f"[WARN] Agent Runtime stop fallo: {exc}")
         try: self.hotkey_listener.stop()
         except Exception: pass
         try: self.session.stop()
@@ -913,6 +946,11 @@ class Jarvis:
             text = str(args.get("text", "")).strip()
             if text:
                 self._send_user_text(text)
+            return True
+        if command == "cancelMission":
+            mission_id = str(args.get("missionId", "")).strip()
+            if mission_id and self.agent_runtime is not None:
+                self.agent_runtime.cancel(mission_id)
             return True
         return False
 
@@ -1210,6 +1248,19 @@ class Jarvis:
             return
         self._tk(lambda: self.overlay.log_event(hint.rstrip(".")))
         self._tk(lambda: self.overlay.append_output(f"\n[{hint}]\n"))
+
+    def _on_agent_runtime_event(self, event: dict) -> None:
+        """Marshalla eventos persistidos de misión hacia la UI sin tocarla desde el worker."""
+        def _deliver() -> None:
+            recorder = getattr(self.overlay, "record_mission_event", None)
+            if callable(recorder):
+                recorder(event)
+                return
+            mission = event.get("mission") or {}
+            status = mission.get("status") or event.get("event_type", "mision")
+            self.overlay.log_event(f"Misión {str(event.get('mission_id', ''))[-8:]}: {status}")
+
+        self._tk(_deliver)
 
     def _on_tool_end(self, name: str, elapsed_ms: float, ok: bool, response=None) -> None:
         """Llamado tras el dispatch. Solo logueo aqui; el overlay no necesita

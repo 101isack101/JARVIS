@@ -24,6 +24,10 @@ __pycache__/
 *.egg-info/
 .pytest_cache/
 
+# Native build artifacts
+audio/native/bin/
+vision/native/bin/
+
 # Grace runtime data
 data/
 logs/
