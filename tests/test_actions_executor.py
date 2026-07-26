@@ -1,6 +1,8 @@
 from types import SimpleNamespace
 
-from actions.executor import SafeActionExecutor
+import subprocess
+
+from actions.executor import MAX_STRUCTURED_SEARCH_FILE_BYTES, SafeActionExecutor
 from security.approvals import AutoApprovalBroker
 
 
@@ -185,6 +187,59 @@ def test_readonly_powershell_allows_inproject_path(tmp_path, monkeypatch):
     assert len(calls) == 1
 
 
+def test_readonly_powershell_blocks_command_chaining(tmp_path, monkeypatch):
+    """Una allowlist de prefijos no debe habilitar un segundo comando."""
+    calls = []
+    monkeypatch.setattr(
+        "actions.executor.subprocess.run",
+        lambda *a, **k: calls.append(a) or _fake_proc(),
+    )
+    ex = SafeActionExecutor(root=tmp_path, mode="prod")
+
+    ampersand = ex.run_powershell("Get-Content README.md & Start-Process calc", cwd=str(tmp_path))
+    multiline = ex.run_powershell("Get-Content README.md\nStart-Process calc", cwd=str(tmp_path))
+    subexpression = ex.run_powershell("Get-Content $(Start-Process calc)", cwd=str(tmp_path))
+
+    assert ampersand["allowed"] is False
+    assert multiline["allowed"] is False
+    assert subexpression["allowed"] is False
+    assert calls == []
+
+
+def test_readonly_powershell_blocks_dynamic_paths_providers_and_globs(tmp_path, monkeypatch):
+    """El shell no debe expandir una ruta fuera del root tras la validación."""
+    calls = []
+    monkeypatch.setattr(
+        "actions.executor.subprocess.run",
+        lambda *a, **k: calls.append(a) or _fake_proc(),
+    )
+    ex = SafeActionExecutor(root=tmp_path, mode="prod")
+
+    dynamic = ex.run_powershell(
+        r"Get-Content $env:USERPROFILE\Documents\notes.txt", cwd=str(tmp_path)
+    )
+    provider = ex.run_powershell("Get-Content Env:USERPROFILE", cwd=str(tmp_path))
+    glob = ex.run_powershell("Get-Content *.md", cwd=str(tmp_path))
+    hidden_rg = ex.run_powershell("rg --hidden API_KEY", cwd=str(tmp_path))
+
+    assert all(result["allowed"] is False for result in (dynamic, provider, glob, hidden_rg))
+    assert calls == []
+
+
+def test_powershell_launch_failure_is_not_reported_as_executed(tmp_path, monkeypatch):
+    def missing_binary(*_args, **_kwargs):
+        raise FileNotFoundError("powershell.exe")
+
+    monkeypatch.setattr("actions.executor.subprocess.run", missing_binary)
+    ex = SafeActionExecutor(root=tmp_path, mode="prod")
+
+    result = ex.run_powershell("Get-ChildItem", cwd=str(tmp_path))
+
+    assert result["allowed"] is True
+    assert result["executed"] is False
+    assert "FileNotFoundError" in result["error"]
+
+
 def test_structured_search_text_skips_secret_paths(tmp_path):
     (tmp_path / "notes.md").write_text("visible needle", encoding="utf-8")
     (tmp_path / "token_notes.md").write_text("hidden needle", encoding="utf-8")
@@ -194,3 +249,33 @@ def test_structured_search_text_skips_secret_paths(tmp_path):
 
     assert result["ok"] is True
     assert result["matches"] == [{"path": "notes.md", "line": 1, "text": "visible needle"}]
+
+
+def test_structured_read_file_reads_only_the_requested_window(tmp_path, monkeypatch):
+    note = tmp_path / "large.md"
+    note.write_text("x" * 10_000, encoding="utf-8")
+    ex = SafeActionExecutor(root=tmp_path, mode="prod")
+
+    def should_not_read_entire_file(*_args, **_kwargs):
+        raise AssertionError("read_text would load the full file")
+
+    monkeypatch.setattr(type(note), "read_text", should_not_read_entire_file)
+    result = ex.run_structured("read_file", path="large.md", max_chars=200)
+
+    assert result["ok"] is True
+    assert result["content"] == "x" * 200
+    assert result["truncated"] is True
+
+
+def test_structured_search_skips_files_above_resource_limit(tmp_path):
+    (tmp_path / "large.md").write_text(
+        "needle\n" + ("x" * MAX_STRUCTURED_SEARCH_FILE_BYTES),
+        encoding="utf-8",
+    )
+    ex = SafeActionExecutor(root=tmp_path, mode="prod")
+
+    result = ex.run_structured("search_text", query="needle")
+
+    assert result["ok"] is True
+    assert result["matches"] == []
+    assert result["skipped_large_files"] == 1

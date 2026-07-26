@@ -1,10 +1,10 @@
 ﻿# JARVIS — Agente Conversacional en Tiempo Real
 
-Asistente estilo Gemini Live con voz bidireccional, visión de pantalla, computer use sobre Windows, GPT 5.5 para codigo/modo agentico y Claude 4.6 Sonnet como reasoner profundo general.
+Asistente estilo Gemini Live con voz bidireccional, visión de pantalla, computer use sobre Windows, GPT-5.6 Terra para codigo/modo agentico complejo y Claude 4.6 Sonnet como reasoner profundo general.
 
 > **Status:** Copiloto local funcional. Voz bidireccional, overlay, hotkeys, memoria RAG, Claude tool, vision/screen capture, action executor seguro, modos, telemetry y budgets ya existen.
 
-> **Version actual:** v1.06 — Agent Runtime read-only, UI Tauri + React y núcleos nativos de audio/visión
+> **Version actual:** v1.07 — GPT-5.6 Terra con tools diferidas, telemetría por misión y hardening del bridge web
 
 ---
 
@@ -32,7 +32,7 @@ Esto arranca el shell Tauri que:
 ## Arquitectura corta
 
 - **Gemini Live** (`google-genai`): voz speech-to-speech nativo, barge-in, vision
-- **GPT 5.5** (`openai`): tool `ask_gpt55_code` para generar codigo, debugging, arquitectura de software y modo agentico
+- **GPT-5.6 Terra** (`openai`, `reasoning.effort=high`): tool `ask_terra_code` para código, debugging, arquitectura y modo agentico complejo. Gemini mantiene la conversación: da una respuesta inicial y Terra mejora el resultado en segundo plano.
 - **Claude 4.6 Sonnet** (`anthropic`): tool `ask_claude_deep` para razonamiento profundo general y fallback
 - **Audio hibrido C++/Python**: AEC/resample de far-end puede usar `audio/native/bin/jarvis_audio_native.dll` y cae a Python si no esta compilado
 - **Vision hibrida C++/Python**: captura de camara puede usar `vision/native/bin/jarvis_vision_sidecar.exe` para liberar Python en modo vision continuo, con fallback OpenCV
@@ -65,10 +65,11 @@ Copy-Item .env.example .env
 Edita `.env` y rellena:
 - **`GEMINI_API_KEY`** — obtener en [https://aistudio.google.com/app/apikey](https://aistudio.google.com/app/apikey)
 - **`ANTHROPIC_API_KEY`** — ya tienes una en `Interview_Copilot\.env`, copiala
-- **`OPENAI_API_KEY`** — habilita `ask_gpt55_code`
-- **`JARVIS_AGENTIC_CODE_MODEL`** — default `gpt-5.5`; cambia este valor si tu cuenta usa otro slug de modelo
-- **`JARVIS_OPENAI_TIMEOUT_S`**, **`JARVIS_ASK_GPT55_TIMEOUT_S`**, **`JARVIS_ASK_CLAUDE_TIMEOUT_S`** — caps de latencia para delegaciones normales. Defaults pensados para voz en vivo.
-- **`JARVIS_ASK_GPT55_LONG_TIMEOUT_S`**, **`JARVIS_ASK_CLAUDE_LONG_TIMEOUT_S`** — caps automaticos para informes largos cuando la tool pide muchos tokens.
+- **`OPENAI_API_KEY`** — habilita `ask_terra_code`
+- **`JARVIS_TERRA_MODEL`** — default `gpt-5.6-terra`
+- **`JARVIS_TERRA_REASONING_EFFORT`** — default `high`; ajusta el esfuerzo de razonamiento de Terra.
+- **`JARVIS_TERRA_TIMEOUT_S`**, **`JARVIS_ASK_TERRA_TIMEOUT_S`**, **`JARVIS_ASK_CLAUDE_TIMEOUT_S`** — caps de latencia para delegaciones normales. Gemini no espera a Terra: responde primero y recibe su resultado después.
+- **`JARVIS_ASK_TERRA_LONG_TIMEOUT_S`**, **`JARVIS_ASK_CLAUDE_LONG_TIMEOUT_S`** — caps automaticos para informes largos cuando la tool pide muchos tokens.
 
 > **Importante:** `.env` debe ser UTF-8 **sin BOM**. NO uses `Set-Content -Encoding utf8` (añade BOM). Usar:
 > ```powershell
@@ -128,7 +129,7 @@ Ejecutar los dos spikes en orden. Ambos deberían terminar en <30s.
 - **Hecho:** Retención automática de screenshots vía `JARVIS_SCREENSHOT_RETENTION_HOURS`
 - **Hecho:** English Practice Mode activable por voz con `english_practice`
 - **Hecho:** UI Tauri + React 19 como modo principal (`jarvis-desktop.exe`): SSE bridge headless, watchdog anti-zombie, ApprovalModal HITL, CameraPanel live, Transcript markdown, Telemetry SVG
-- **Hecho:** Agent Runtime v0 con misiones read-only persistentes, ejecución background, cancelación, recovery, evidencia verificada y panel de progreso
+- **Hecho:** Agent Runtime v0 con misiones read-only persistentes, ejecución background, cancelación, recovery, evidencia verificada y Mission Control en vivo
 - **Pendiente:** Autopilot con confirmaciones y acciones de escritura controladas
 - **Pendiente:** Historial ampliado de errores y artefactos en el dashboard
 
@@ -253,6 +254,15 @@ Gemini usa internamente `jarvis_task(create|status|list|cancel)`. `create` devue
 guarda en `data/agent_runtime/agent_runtime.db`; la evidencia redactada vive en
 `data/agent_runtime/artifacts/`. Tras un cierre duro, el siguiente arranque reconcilia los
 steps sin repetir artefactos confirmados.
+
+### Mission Control
+
+El icono de JARVIS en la barra superior —o una misión en el panel lateral— abre el
+Mission Control. Muestra el plan, pasos y verificaciones, timeline de hasta 50 eventos,
+duración y deltas de tokens/costo por proveedor. Mientras está abierto refresca el detalle
+de la misión seleccionada cada 1.5 s desde el bridge local; no transmite el contenido crudo
+de artefactos. El costo se etiqueta como *ventana de misión / sesión*: es un delta del
+tracker de sesión y puede incluir actividad concurrente de conversación.
 
 Límites de seguridad de v0:
 

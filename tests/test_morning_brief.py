@@ -7,6 +7,7 @@ from proactivity.git_repos import RepoStatus
 from proactivity.morning_brief import (
     BriefData,
     MorningBriefConfig,
+    _WIKI_HOT_MAX_BYTES,
     collect_morning_brief,
     render_brief_prompt,
 )
@@ -58,6 +59,77 @@ def test_collect_is_fail_safe(monkeypatch, tmp_path):
     assert isinstance(data, BriefData)
     assert data.repos == []
     assert data.news is None
+
+
+def test_config_wiki_hot_default_and_disable():
+    cfg = MorningBriefConfig.from_env({})
+    assert cfg.wiki_enabled is True
+    assert cfg.wiki_hot_path.name == "hot.md"
+    cfg_off = MorningBriefConfig.from_env({"JARVIS_BRIEF_WIKI": "false"})
+    assert cfg_off.wiki_enabled is False
+
+
+def test_collect_reads_wiki_hot(tmp_path):
+    hot = tmp_path / "hot.md"
+    hot.write_text(
+        "# Hot cache\n\n*Reescribir en cada ingesta.*\n\n"
+        "**Estado:** 22 páginas, 3 clusters; eje [[IA multipolar]] "
+        "y curso [[CS50P|CS50 Python]].\n",
+        encoding="utf-8",
+    )
+    cfg = MorningBriefConfig(repos_root=tmp_path, news_dir=tmp_path,
+                             wiki_hot_path=hot)
+    data = collect_morning_brief(vault_block="", cfg=cfg)
+    assert data.wiki_hot is not None
+    assert "22 páginas" in data.wiki_hot
+    # El título y la línea de instrucción no se narran
+    assert "Hot cache" not in data.wiki_hot
+    assert "Reescribir" not in data.wiki_hot
+    # Los wikilinks se aplanan para voz
+    assert "[[" not in data.wiki_hot
+    assert "IA multipolar" in data.wiki_hot
+    assert "CS50 Python" in data.wiki_hot
+
+
+def test_collect_wiki_hot_missing_file_is_fail_safe(tmp_path):
+    cfg = MorningBriefConfig(repos_root=tmp_path, news_dir=tmp_path,
+                             wiki_hot_path=tmp_path / "no-existe.md")
+    data = collect_morning_brief(vault_block="", cfg=cfg)
+    assert data.wiki_hot is None
+
+
+def test_collect_wiki_hot_disabled(tmp_path):
+    hot = tmp_path / "hot.md"
+    hot.write_text("**Estado:** algo\n", encoding="utf-8")
+    cfg = MorningBriefConfig(repos_root=tmp_path, news_dir=tmp_path,
+                             wiki_hot_path=hot, wiki_enabled=False)
+    data = collect_morning_brief(vault_block="", cfg=cfg)
+    assert data.wiki_hot is None
+
+
+def test_collect_wiki_hot_redacts_secrets_and_bounds_input(tmp_path):
+    hot = tmp_path / "hot.md"
+    secret = "sk-" + ("x" * 24)
+    hot.write_text(f"**Estado:** OPENAI_API_KEY={secret}\n", encoding="utf-8")
+    cfg = MorningBriefConfig(repos_root=tmp_path, news_dir=tmp_path, wiki_hot_path=hot)
+
+    data = collect_morning_brief(vault_block="", cfg=cfg)
+
+    assert data.wiki_hot == "**Estado:** OPENAI_API_KEY=[REDACTED]"
+    assert secret not in data.wiki_hot
+
+    hot.write_bytes(b"x" * (_WIKI_HOT_MAX_BYTES + 1))
+    assert collect_morning_brief(vault_block="", cfg=cfg).wiki_hot is None
+
+
+def test_render_includes_wiki_section():
+    data = BriefData(vault_block="", repos=[], news=None, events=[],
+                     wiki_hot="**Estado:** 22 páginas, 3 clusters conectados.")
+    prompt = render_brief_prompt(data)
+    assert "wiki" in prompt.lower()
+    assert "22 páginas" in prompt
+    assert "[ARRANQUE]" in prompt
+    assert "referencia no confiable" in prompt
 
 
 def test_render_all_empty_is_short_greeting():

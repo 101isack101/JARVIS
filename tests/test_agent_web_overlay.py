@@ -51,3 +51,24 @@ def test_set_missions_is_bounded():
         assert len(overlay.snapshot()["missions"]) == 20
     finally:
         overlay.close()
+
+
+def test_mission_detail_is_bounded_and_emits_sse():
+    overlay = _make_overlay()
+    try:
+        client = overlay.register_client()
+        overlay.set_mission_detail({
+            "ok": True,
+            "mission": {**_mission(), "final_summary": "x" * 5000},
+            "steps": [{"id": f"stp_{i}"} for i in range(12)],
+            "events": [{"id": i, "event_type": "step.completed"} for i in range(60)],
+        })
+        emitted = json.loads(client.get(timeout=1))
+        assert emitted["command"] == "missionDetail"
+        detail = overlay.snapshot()["missionDetail"]
+        assert len(detail["steps"]) == 8
+        assert len(detail["events"]) == 50
+        assert len(detail["mission"]["final_summary"]) == 4000
+        assert detail["mission"]["final_summary"].endswith("…")
+    finally:
+        overlay.close()

@@ -15,9 +15,11 @@ Uso:
 from __future__ import annotations
 
 import os
+import secrets
 import sys
 import threading
 import time
+from html import escape
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from urllib.parse import urlparse, parse_qs
@@ -28,6 +30,12 @@ TIMEOUT_S = 300  # 5 minutos
 # Resultado compartido entre handler y main thread
 _captured: dict = {"code": None, "state": None, "error": None}
 _done_event = threading.Event()
+_expected_state: str | None = None
+
+
+def _state_matches(state: str | None) -> bool:
+    """Only accept the callback produced by this OAuth authorization flow."""
+    return bool(_expected_state and state and secrets.compare_digest(state, _expected_state))
 
 
 class CallbackHandler(BaseHTTPRequestHandler):
@@ -45,16 +53,25 @@ class CallbackHandler(BaseHTTPRequestHandler):
         state = (qs.get("state") or [None])[0]
         error = (qs.get("error") or [None])[0]
 
-        if error:
+        if not _state_matches(state):
+            _captured["error"] = "state_mismatch"
+            html = (
+                "<!doctype html><html><body><h1>Callback OAuth invalido</h1>"
+                "<p>El estado no coincide; vuelve a iniciar el login desde JARVIS.</p>"
+                "</body></html>"
+            )
+            status = 400
+        elif error:
             _captured["error"] = error
             html = (
                 "<!doctype html><html><body style='font-family:sans-serif;"
                 "max-width:600px;margin:80px auto;text-align:center;'>"
                 "<h1 style='color:#dc2626;'>Spotify rechazo la autorizacion</h1>"
-                f"<p>Error: <code>{error}</code></p>"
+                f"<p>Error: <code>{escape(error)}</code></p>"
                 "<p>Podes cerrar esta pestana y reintentar desde Jarvis.</p>"
                 "</body></html>"
             )
+            status = 200
         elif code:
             _captured["code"] = code
             _captured["state"] = state
@@ -67,12 +84,14 @@ class CallbackHandler(BaseHTTPRequestHandler):
                 "<p style='color:#7aa3ab;'>Podes cerrar esta pestana.</p>"
                 "</body></html>"
             )
+            status = 200
         else:
             _captured["error"] = "no_code_in_callback"
             html = "<h1>Callback sin code ni error. Revisa el log.</h1>"
+            status = 400
 
         body = html.encode("utf-8")
-        self.send_response(200)
+        self.send_response(status)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
@@ -85,6 +104,7 @@ class CallbackHandler(BaseHTTPRequestHandler):
 
 
 def main() -> int:
+    global _expected_state
     if sys.platform == "win32":
         sys.stdout.reconfigure(encoding="utf-8")
 
@@ -103,10 +123,12 @@ def main() -> int:
         cache_abs = ROOT / cache_abs
     cache_abs.parent.mkdir(parents=True, exist_ok=True)
 
+    _expected_state = secrets.token_urlsafe(32)
     auth = SpotifyOAuth(
         client_id=os.environ["SPOTIFY_CLIENT_ID"],
         client_secret=os.environ["SPOTIFY_CLIENT_SECRET"],
         redirect_uri=os.environ.get("SPOTIFY_REDIRECT_URI", "http://127.0.0.1:8888/callback"),
+        state=_expected_state,
         scope=scope,
         cache_path=str(cache_abs),
         open_browser=False,

@@ -63,7 +63,7 @@ from memory.session_summary import (
 )
 from memory.tools import ToolContext, ToolDispatcher, make_tool_object
 from overlay.ui_thread import UiThread
-from openai_code.reasoner import GPT55CodeReasoner
+from openai_code.reasoner import TerraCodeReasoner
 from memory.self_improvement import KnowledgeImprover
 from memory.self_improvement.config import KnowledgeImproverConfig
 from memory.self_improvement.retrieval_curation import RetrievalCurator
@@ -257,7 +257,7 @@ TOOL_HINTS: dict[str, str] = {
     "jarvis_remember": "Guardando en tu vault...",
     "obsidian_mcp": "Operando en Obsidian...",
     "jarvis_open_obsidian": "Abriendo Obsidian...",
-    "ask_gpt55_code": "Consultando GPT 5.5...",
+    "ask_terra_code": "Terra 5.6 analizando...",
     "jarvis_run_safe_command": "Ejecutando comando...",
     "spotify_control": "Controlando Spotify...",
 }
@@ -277,7 +277,7 @@ def _env_float(name: str, default: float) -> float:
 # reasoner externo se tarda demasiado, Gemini recupera el turno y puede proponer
 # dividir la tarea. Se pueden subir por .env cuando Isaac quiera trabajo largo.
 TOOL_TIMEOUTS_S: dict[str, float] = {
-    "ask_gpt55_code": _env_float("JARVIS_ASK_GPT55_TIMEOUT_S", 45.0),
+    "ask_terra_code": _env_float("JARVIS_ASK_TERRA_TIMEOUT_S", 90.0),
     "ask_claude_deep": _env_float("JARVIS_ASK_CLAUDE_TIMEOUT_S", 30.0),
     "study_mode": 60.0,
     "obs_memory": 900.0,
@@ -285,7 +285,7 @@ TOOL_TIMEOUTS_S: dict[str, float] = {
 }
 
 LONG_TOOL_TIMEOUTS_S: dict[str, float] = {
-    "ask_gpt55_code": _env_float("JARVIS_ASK_GPT55_LONG_TIMEOUT_S", 120.0),
+    "ask_terra_code": _env_float("JARVIS_ASK_TERRA_LONG_TIMEOUT_S", 180.0),
     "ask_claude_deep": _env_float("JARVIS_ASK_CLAUDE_LONG_TIMEOUT_S", 90.0),
 }
 
@@ -572,6 +572,7 @@ class Jarvis:
             write_critique_enabled=KnowledgeImproverConfig.from_env().write_critique_enabled,
             session_journal=self.session_journal,
             agent_runtime=None,
+            background_notifier=self._notify_background_completion,
         )
         self.dispatcher = ToolDispatcher(self.tool_ctx)
         self.indexer = IncrementalIndexer(
@@ -615,6 +616,7 @@ class Jarvis:
                 executor=self.actions,
                 config=agent_cfg,
                 event_sink=self._on_agent_runtime_event,
+                tracker=self.tracker,
             )
             self.tool_ctx.agent_runtime = self.agent_runtime
             setter = getattr(self.overlay, "set_missions", None)
@@ -733,12 +735,38 @@ class Jarvis:
             self._log(f"[OBS] analisis listo: {title}{suffix}")
             self._tk(lambda: self.overlay.log_event(f"OBS listo: {title}", "ok"))
             self._tk(lambda: self.overlay.append_output(f"\n[OBS Memory listo: {title}{suffix}]\n"))
+            self._notify_background_completion(
+                "OBS Memory",
+                f"El analisis de {title} termino" + (f" y guardo {note_path}." if note_path else "."),
+            )
             return
 
         error = job.get("error") or "sin detalle"
         self._log(f"[WARN] OBS Memory fallo: {title}: {error}")
         self._tk(lambda: self.overlay.log_event(f"OBS fallo: {title}", "error"))
         self._tk(lambda: self.overlay.append_output(f"\n[OBS Memory fallo: {title} - {error}]\n"))
+        self._notify_background_completion(
+            "OBS Memory",
+            f"El analisis de {title} fallo: {error}",
+            ok=False,
+        )
+
+    def _notify_background_completion(
+        self,
+        title: str,
+        detail: str = "",
+        *,
+        ok: bool = True,
+    ) -> None:
+        """Notifica por UI y voz cuando termina un worker independiente."""
+        level = "ok" if ok else "error"
+        status = "listo" if ok else "fallo"
+        self._log(f"[BACKGROUND] {title}: {status}")
+        self._tk(lambda: self.overlay.log_event(f"{title}: {status}", level))
+        try:
+            self.session.notify_background_completion(title, detail, ok=ok)
+        except Exception as exc:
+            self._log(f"[WARN] no se pudo encolar aviso de {title}: {exc}")
 
     # ---- Lifecycle ----
 
@@ -951,6 +979,12 @@ class Jarvis:
             mission_id = str(args.get("missionId", "")).strip()
             if mission_id and self.agent_runtime is not None:
                 self.agent_runtime.cancel(mission_id)
+            return True
+        if command == "missionDetail":
+            mission_id = str(args.get("missionId", "")).strip()
+            if mission_id and self.agent_runtime is not None:
+                detail = self.agent_runtime.status(mission_id)
+                self._tk(lambda payload=detail: self.overlay.set_mission_detail(payload))
             return True
         return False
 
@@ -1261,6 +1295,25 @@ class Jarvis:
             self.overlay.log_event(f"Misión {str(event.get('mission_id', ''))[-8:]}: {status}")
 
         self._tk(_deliver)
+        event_type = str(event.get("event_type") or "")
+        if event_type not in {"mission.completed", "mission.blocked", "mission.cancelled"}:
+            return
+        mission = event.get("mission") or {}
+        mission_id = str(event.get("mission_id") or mission.get("id") or "")[-8:]
+        goal = str(mission.get("goal") or "Mision")
+        if event_type == "mission.completed":
+            detail = str(mission.get("final_summary") or f"La mision {mission_id} termino.")
+            self._notify_background_completion("Mision de JARVIS", detail)
+        elif event_type == "mission.cancelled":
+            self._notify_background_completion(
+                "Mision de JARVIS",
+                f"La mision {mission_id} fue cancelada: {goal}",
+                ok=False,
+            )
+        else:
+            payload = event.get("payload") or {}
+            detail = str(payload.get("detail") or mission.get("error_code") or goal)
+            self._notify_background_completion("Mision de JARVIS", detail, ok=False)
 
     def _on_tool_end(self, name: str, elapsed_ms: float, ok: bool, response=None) -> None:
         """Llamado tras el dispatch. Solo logueo aqui; el overlay no necesita
@@ -1499,14 +1552,14 @@ class Jarvis:
             self._log(f"[WARN] ClaudeReasoner no disponible: {type(exc).__name__}: {exc}")
             return None
 
-    def _build_code_reasoner(self) -> GPT55CodeReasoner | None:
+    def _build_code_reasoner(self) -> TerraCodeReasoner | None:
         if not os.environ.get("OPENAI_API_KEY"):
-            self._log("OPENAI_API_KEY no configurada; ask_gpt55_code queda desactivada")
+            self._log("OPENAI_API_KEY no configurada; ask_terra_code queda desactivada")
             return None
         try:
-            return GPT55CodeReasoner(tracker=self.tracker)
+            return TerraCodeReasoner(tracker=self.tracker)
         except Exception as exc:
-            self._log(f"[WARN] GPT55CodeReasoner no disponible: {type(exc).__name__}: {exc}")
+            self._log(f"[WARN] TerraCodeReasoner no disponible: {type(exc).__name__}: {exc}")
             return None
 
     def _prewarm_reasoner_clients(self) -> None:

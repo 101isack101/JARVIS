@@ -14,7 +14,6 @@ python-dotenv>=1.0.1,<2.0
 
 # Audio I/O
 sounddevice>=0.5.1,<1.0
-soundcard>=0.4.3,<1.0
 numpy>=1.26.0,<3.0
 scipy>=1.11.0,<2.0         # resample_poly para el AEC (referencia 24k->16k)
 
@@ -32,7 +31,6 @@ onnxruntime>=1.10.0,<2.0   # backend de inferencia de openWakeWord en Windows
 
 # Hotkeys + automation
 keyboard>=0.13.5,<1.0
-pyautogui>=0.9.54,<1.0
 pywinauto>=0.6.8,<1.0
 pywin32>=306               # SetWindowDisplayAffinity para overlay invisible
 spotipy>=2.24.0,<3.0       # Spotify Web API + OAuth cache para control de musica
@@ -40,9 +38,7 @@ websocket-client>=1.8.0,<2.0  # Chrome DevTools Protocol opcional para leer DOM
 
 # Screen capture
 Pillow>=10.4.0,<12.0       # ImageGrab
-mss>=10.0.0,<11.0          # Multi-monitor rapido
 opencv-python>=4.10.0,<5.0 # CameraCapture (vision/camera.py) + keyframes/OCR visual
-imagehash>=4.3.0,<5.0      # Deduplicacion perceptual de frames
 
 # Memoria + RAG (Obsidian-backed con indexacion incremental)
 faiss-cpu>=1.8.0,<2.0

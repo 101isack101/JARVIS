@@ -1,6 +1,6 @@
 from types import SimpleNamespace
 
-from openai_code.reasoner import GPT55CodeReasoner
+from openai_code.reasoner import TerraCodeReasoner
 
 
 class FakeResponses:
@@ -20,10 +20,10 @@ class FakeClient:
         self.responses = FakeResponses()
 
 
-def test_gpt55_code_reasoner_uses_responses_api_and_model():
+def test_terra_code_reasoner_uses_responses_api_and_high_reasoning():
     client = FakeClient()
-    reasoner = GPT55CodeReasoner(
-        model="gpt-5.5",
+    reasoner = TerraCodeReasoner(
+        model="gpt-5.6-terra",
         client=client,
         api_key=None,
         tracker=None,
@@ -36,8 +36,9 @@ def test_gpt55_code_reasoner_uses_responses_api_and_model():
     )
 
     call = client.responses.calls[0]
-    assert call["model"] == "gpt-5.5"
+    assert call["model"] == "gpt-5.6-terra"
     assert call["max_output_tokens"] == 900
+    assert call["reasoning"] == {"effort": "high"}
     assert call["instructions"]
     assert "Implementa una skill" in call["input"]
     assert "repo=JARVIS" in call["input"]
@@ -46,10 +47,10 @@ def test_gpt55_code_reasoner_uses_responses_api_and_model():
     assert result.output_tokens == 34
 
 
-def test_gpt55_warmup_accepts_injected_client_without_api_key():
+def test_terra_warmup_accepts_injected_client_without_api_key():
     client = FakeClient()
-    reasoner = GPT55CodeReasoner(
-        model="gpt-5.5",
+    reasoner = TerraCodeReasoner(
+        model="gpt-5.6-terra",
         client=client,
         api_key=None,
         tracker=None,

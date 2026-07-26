@@ -19,7 +19,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 # Fecha del ultimo snapshot manual de precios. Usar para detectar tablas stale.
-PRICING_LAST_UPDATED = "2026-05-15"
+PRICING_LAST_UPDATED = "2026-07-22"
 
 # Modelo canonico de razonamiento profundo en Jarvis. Cambios deliberados solo.
 JARVIS_REASONER_MODEL = "claude-sonnet-4-6"
@@ -55,6 +55,14 @@ PRICING: dict[str, ModelPricing] = {
         output=5.00,
         cache_write=1.25,
         cache_read=0.10,
+    ),
+    # === OpenAI ===
+    # GPT-5.6 Terra: $2.50 input, $0.25 cached input, $15 output / 1M tokens.
+    "gpt-5.6-terra": ModelPricing(
+        input=2.50,
+        output=15.00,
+        cache_write=3.125,
+        cache_read=0.25,
     ),
     # === Gemini Live (Google) ===
     # Gemini Live cobra audio + texto + vision con tarifas distintas.

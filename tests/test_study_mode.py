@@ -66,10 +66,12 @@ def test_study_mode_observation_flushes_to_obsidian(tmp_path):
 def test_study_mode_background_flush_returns_before_reasoner_finishes(tmp_path):
     vault = ObsidianVault(tmp_path, read_all=True)
     reasoner = BlockingReasoner()
+    notifications = []
     controller = StudyModeController(
         vault=vault,
         reasoner=reasoner,
         config=StudyModeConfig(capture_interval_s=999, max_chars_per_capture=2000),
+        on_flush_done=notifications.append,
     )
     controller.start(
         title="LangGraph Study",
@@ -95,5 +97,6 @@ def test_study_mode_background_flush_returns_before_reasoner_finishes(tmp_path):
     status = controller.status()
     assert status["flush"]["running"] is False
     assert status["flush"]["last_ok"] is True
+    assert notifications and notifications[0]["ok"] is True
     note_path = vault.memory_path / "Study Mode" / "LangGraph.md"
     assert "Nota background de prueba" in note_path.read_text(encoding="utf-8")

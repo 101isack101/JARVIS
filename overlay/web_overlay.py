@@ -22,7 +22,7 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Callable
-from urllib.parse import unquote, urlparse
+from urllib.parse import unquote, urlparse, urlsplit
 
 from jarvis_version import JARVIS_VERSION_LABEL
 from overlay.scheduler import UiScheduler
@@ -72,6 +72,8 @@ REFRESH_MS = 500
 DEFAULT_AUDIO_VISUAL_FPS = 30
 USAGE_RATE_WINDOW_S = 30.0
 CAMERA_RATE_WINDOW_S = 5.0
+MAX_JSON_REQUEST_BYTES = 1_000_000
+LOOPBACK_HOSTNAMES = frozenset({"127.0.0.1", "localhost", "::1"})
 
 
 def _env_truthy(name: str, default: bool = False) -> bool:
@@ -148,7 +150,27 @@ class _BridgeHandler(BaseHTTPRequestHandler):
         if _env_truthy("JARVIS_WEB_UI_HTTP_LOG", False):
             super().log_message(fmt, *args)
 
+    def _host_allowed(self) -> bool:
+        """Rechaza DNS rebinding contra el bridge local.
+
+        Sin esto, una web maliciosa puede apuntar su dominio a 127.0.0.1, quedar
+        same-origin con el bridge y leer /state (que expone uiToken, transcripts
+        y frames de camara) para despues postear /command con ese token. El
+        chequeo de token no alcanza porque el propio /state lo entrega.
+        """
+        try:
+            hostname = urlsplit(f"//{self.headers.get('Host') or ''}").hostname
+        except ValueError:
+            return False
+        if not hostname:
+            return False
+        bound = str(self.server.server_address[0]).lower()
+        return hostname.lower() in (LOOPBACK_HOSTNAMES | {bound})
+
     def do_GET(self) -> None:  # noqa: N802 - stdlib handler API
+        if not self._host_allowed():
+            self.send_error(HTTPStatus.FORBIDDEN, "bad host")
+            return
         parsed = urlparse(self.path)
         if parsed.path == "/state":
             self._send_json(self.server.overlay.snapshot())
@@ -159,6 +181,9 @@ class _BridgeHandler(BaseHTTPRequestHandler):
         self._serve_static(parsed.path)
 
     def do_POST(self) -> None:  # noqa: N802 - stdlib handler API
+        if not self._host_allowed():
+            self.send_error(HTTPStatus.FORBIDDEN, "bad host")
+            return
         parsed = urlparse(self.path)
         body = self._read_json()
         if parsed.path == "/approval":
@@ -183,10 +208,15 @@ class _BridgeHandler(BaseHTTPRequestHandler):
         self._send_json({"ok": False, "error": "unknown endpoint"}, HTTPStatus.NOT_FOUND)
 
     def _read_json(self) -> dict[str, Any]:
-        length = int(self.headers.get("Content-Length", "0") or "0")
-        if length <= 0:
+        try:
+            length = int(self.headers.get("Content-Length", "0") or "0")
+        except (TypeError, ValueError):
+            return {}
+        if length <= 0 or length > MAX_JSON_REQUEST_BYTES:
             return {}
         raw = self.rfile.read(length)
+        if len(raw) != length:
+            return {}
         try:
             value = json.loads(raw.decode("utf-8"))
         except Exception:
@@ -287,6 +317,7 @@ class WebJarvisOverlay:
         self._agent_events: list[dict[str, Any]] = []
         self._missions: dict[str, dict[str, Any]] = {}
         self._mission_events: list[dict[str, Any]] = []
+        self._mission_detail: dict[str, Any] | None = None
         self._audio_telemetry: dict[str, Any] = {}
         self._latency_lines: list[str] = []
         self._camera_active = False
@@ -436,6 +467,7 @@ class WebJarvisOverlay:
             "agentEvents": self._agent_events[-30:],
             "missions": list(self._missions.values())[-20:],
             "missionEvents": self._mission_events[-100:],
+            "missionDetail": self._mission_detail,
             "audioTelemetry": self._audio_telemetry,
             "latency": self._latency_lines,
             "cameraActive": self._camera_active,
@@ -691,6 +723,30 @@ class WebJarvisOverlay:
         self._mission_events.append(clean_event)
         self._mission_events = self._mission_events[-100:]
         self.emit("missionEvent", clean_event)
+
+    def set_mission_detail(self, detail: dict[str, Any]) -> None:
+        """Entrega al Command Center un detalle acotado, sin contenido de artefactos."""
+        if not isinstance(detail, dict):
+            return
+        mission = detail.get("mission")
+        steps = detail.get("steps")
+        events = detail.get("events")
+        safe = {
+            "ok": bool(detail.get("ok")),
+            "error_code": detail.get("error_code"),
+            "error": str(detail.get("error") or "")[:500],
+            "mission": dict(mission) if isinstance(mission, dict) else None,
+            "steps": [dict(item) for item in (steps or [])[:8] if isinstance(item, dict)],
+            "events": [dict(item) for item in (events or [])[-50:] if isinstance(item, dict)],
+        }
+        # El resumen final es evidencia ya redactada; aun asi lo acotamos para SSE/UI.
+        if safe["mission"] and isinstance(safe["mission"].get("final_summary"), str):
+            summary = safe["mission"]["final_summary"]
+            safe["mission"]["final_summary"] = (
+                summary[:3999] + "…" if len(summary) > 4000 else summary
+            )
+        self._mission_detail = safe
+        self.emit("missionDetail", safe)
 
     def record_audio_telemetry(self, payload: dict[str, Any]) -> None:
         self._audio_telemetry = {**payload, "stamp": time.strftime("%H:%M:%S")}

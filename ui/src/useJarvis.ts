@@ -6,6 +6,7 @@ import type {
   ApprovalPayload, ConversationMessage, ConversationRole, JarvisSnapshot,
   RuntimeTelemetry, SystemStats, Weather,
   MissionEvent, MissionSummary,
+  MissionDetail,
 } from './types'
 
 export interface JarvisUIState {
@@ -24,6 +25,7 @@ export interface JarvisUIState {
   agentTools: AgentToolEvent[]
   missions: MissionSummary[]
   missionEvents: MissionEvent[]
+  missionDetail: MissionDetail | null
   audioTelemetry: AudioTelemetry | null
   runtimeTelemetry: RuntimeTelemetry | null
   latencyLines: string[]
@@ -51,6 +53,7 @@ const INITIAL: JarvisUIState = {
   agentTools: [],
   missions: [],
   missionEvents: [],
+  missionDetail: null,
   audioTelemetry: null,
   runtimeTelemetry: null,
   latencyLines: [],
@@ -146,6 +149,7 @@ function applyCommand(set: UiDispatch, command: string, args: unknown[]) {
           agentTools: snap.agentEvents ?? [],
           missions: snap.missions ?? [],
           missionEvents: snap.missionEvents ?? [],
+          missionDetail: snap.missionDetail ?? null,
           audioTelemetry: snap.audioTelemetry ?? null,
           runtimeTelemetry: snap.runtimeTelemetry ?? null,
           latencyLines: snap.latency ?? [],
@@ -220,6 +224,7 @@ function applyCommand(set: UiDispatch, command: string, args: unknown[]) {
         const event = args[0] as MissionEvent
         return { ...prev, missionEvents: [...prev.missionEvents.slice(-99), event] }
       }
+      case 'missionDetail': return { ...prev, missionDetail: args[0] as MissionDetail }
       case 'audioTelemetry': return { ...prev, audioTelemetry: args[0] as AudioTelemetry }
       case 'runtimeTelemetry': return { ...prev, runtimeTelemetry: args[0] as RuntimeTelemetry }
       case 'turnLatency': {

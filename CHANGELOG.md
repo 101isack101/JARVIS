@@ -2,6 +2,63 @@
 
 Todas las versiones relevantes de JARVIS se documentan aqui.
 
+## Unreleased
+
+## 1.07 - 2026-07-26
+
+### Added
+
+- GPT-5.6 Terra reemplaza a GPT-5.5 como especialista de codigo y modo agentico:
+  `TerraCodeReasoner` (`openai_code/reasoner.py`) sobre la Responses API con
+  `reasoning.effort` configurable y variante async. Nueva tool `ask_terra_code`.
+  `GPT55CodeReasoner` queda como alias de compatibilidad.
+  Config: `JARVIS_TERRA_MODEL`, `JARVIS_TERRA_REASONING_EFFORT` (default high),
+  `JARVIS_TERRA_TIMEOUT_S`, `JARVIS_ASK_TERRA_TIMEOUT_S/_LONG_TIMEOUT_S`.
+- Tools diferidas en Gemini Live (`gemini/session.py`): `ask_terra_code` devuelve
+  acuse inmediato y completa en segundo plano; el resultado se reinyecta como
+  follow-up. Gemini responde primero, Terra razona sin bloquear la voz. Los
+  resultados sobreviven a reconexiones de Live y solo se cancelan en stop
+  explicito de sesion. Solo se difieren tools idempotentes y read-only.
+- Telemetria por mision en el Agent Runtime: costo, tokens y duracion medidos
+  como delta contra un baseline tomado cuando el worker toma la mision, no
+  cuando entra a la cola, para que el tiempo en FIFO no absorba uso ajeno.
+  Se congela al terminar. Expuesta en `/state` y en el panel React de misiones.
+- Briefing matutino narra el estado de la LLM Wiki (patron Karpathy) del vault:
+  nueva fuente fail-safe en `proactivity/morning_brief.py` que lee
+  `Wiki/Meta/hot.md`, descarta titulo/frontmatter/instrucciones, aplana
+  wikilinks para voz y corta en palabra completa (max 900 chars).
+  Config: `JARVIS_BRIEF_WIKI` (default true), `JARVIS_BRIEF_WIKI_HOT` (ruta).
+- Precio de `gpt-5.6-terra` en `telemetry/costs.py`; snapshot de precios al
+  2026-07-22.
+
+### Security
+
+- Bridge web local rechaza DNS rebinding: `_host_allowed` valida el header
+  `Host` contra loopback y la bind address antes de servir cualquier endpoint
+  (`overlay/web_overlay.py`). Sin esto, una web maliciosa podia apuntar su
+  dominio a 127.0.0.1, volverse same-origin, leer `/state` —que expone
+  `uiToken`, transcripts y frames de camara— y luego postear `/command`
+  con ese token, llegando a `sendText` y al control del agente.
+- OAuth de Spotify valida el parametro `state` con `compare_digest` y escapa el
+  `error` del callback en el HTML (`actions/spotify_login_capture.py`). Antes
+  aceptaba cualquier callback y reflejaba el error sin escapar.
+- `actions/executor.py` endurece los comandos read-only: bloquea `$`, backtick,
+  `&` y multilinea, providers de PowerShell (`env:`, `hklm:`, `registry:`...),
+  globs en rutas y flags tipo `--no-ignore`/`--hidden` que revelarian archivos
+  ignorados. Limites de recursos en lecturas estructuradas.
+- El envelope `<terra_result>` marca la salida de la tool como dato no confiable
+  y evita que el texto devuelto forje sus propios delimitadores.
+
+### Changed
+
+- `memory/tools.py` se parte: las declaraciones de function calling salen a
+  `memory/tool_declarations.py` (1012 lineas menos en el modulo de dispatch).
+- Registry de skills apunta a `ask_terra_code` en lugar de `ask_gpt55_code`.
+
+### Removed
+
+- Dependencias muertas: `soundcard`, `pyautogui`, `mss`, `imagehash`.
+
 ## 1.06 - 2026-07-11
 
 ### Added

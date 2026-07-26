@@ -37,9 +37,28 @@ HARD_BLOCKED_TOKENS = (
     ">",
     ">>",
     "|",
+    "&",
     "&&",
     "||",
     ";",
+    "$(",
+    "$",
+    "`",
+)
+
+# Los comandos read-only heredados siguen usando PowerShell, cuyo parser puede
+# expandir rutas despues de que Path haya validado una cadena literal. Estos
+# modificadores pueden revelar archivos ignorados/sensibles sin nombrarlos.
+POWERSHELL_PROVIDER_PREFIXES = (
+    "alias:",
+    "cert:",
+    "env:",
+    "function:",
+    "hklm:",
+    "hkcu:",
+    "registry:",
+    "variable:",
+    "wsman:",
 )
 
 INPUT_AUTOMATION_TOKENS = (
@@ -76,6 +95,12 @@ RISKY_TOKENS = (
     "npm install",
     "npm run",
 )
+
+# Structured reads are exposed to the agent runtime. Keep their resource use
+# bounded so a single large artifact cannot stall the voice loop or exhaust
+# process memory before the response is truncated.
+MAX_STRUCTURED_SEARCH_FILE_BYTES = 2 * 1024 * 1024
+MAX_STRUCTURED_SEARCH_FILES = 2_000
 
 
 @dataclass
@@ -154,10 +179,26 @@ class SafeActionExecutor:
         Aqui replicamos la contencion que `run_structured` ya aplica via
         `_resolve_safe_path`, para que el prompt no sea la unica barrera.
         """
+        normalized = self._normalize_command(command)
+        for token in normalized.split():
+            if (
+                token in {"--hidden", "--no-ignore", "--no-ignore-vcs", "--glob"}
+                or token.startswith(("--glob=", "--no-ignore="))
+                or (token.startswith("-g") and len(token) > 1)
+                or (token.startswith("-u") and len(token) > 1 and set(token[1:]) == {"u"})
+            ):
+                return "modificador que puede revelar archivos ignorados no permitido"
         for token in command.strip().split():
             t = token.strip().strip("\"'")
             if not t or t.startswith("-"):
                 continue  # flags (-Path, -First...) no son rutas
+            lowered = t.lower()
+            if lowered.startswith(POWERSHELL_PROVIDER_PREFIXES):
+                return f"provider PowerShell no permitido: {t}"
+            if "::" in t:
+                return f"provider PowerShell no permitido: {t}"
+            if any(marker in t for marker in ("*", "?", "[", "]", "{", "}")):
+                return f"globs no permitidos en rutas readonly: {t}"
             if is_secret_path(t):
                 return f"argumento sensible: {t}"
             if t.startswith("~"):
@@ -179,6 +220,8 @@ class SafeActionExecutor:
         return None
 
     def _hard_block_reason(self, command: str) -> str | None:
+        if "\n" in command or "\r" in command:
+            return "comandos multilinea no permitidos"
         normalized = self._normalize_command(command)
         if any(tok in normalized for tok in HARD_BLOCKED_TOKENS):
             return "composicion de shell no permitida"
@@ -270,15 +313,16 @@ class SafeActionExecutor:
                     return {"ok": False, "allowed": True, "operation": op, "error": f"no existe: {target}"}
                 if not target.is_file():
                     return {"ok": False, "allowed": True, "operation": op, "error": f"no es archivo: {target}"}
-                text = target.read_text(encoding="utf-8", errors="replace")
-                clipped = self._clip_output(text[:max_chars + 1], "file")
+                with target.open("r", encoding="utf-8", errors="replace") as handle:
+                    text = handle.read(max_chars + 1)
+                truncated = len(text) > max_chars
                 return {
                     "ok": True,
                     "allowed": True,
                     "operation": op,
                     "path": str(target.relative_to(self.root)),
-                    "content": clipped[:max_chars],
-                    "truncated": len(text) > max_chars,
+                    "content": text[:max_chars],
+                    "truncated": truncated,
                 }
 
             if op == "search_text":
@@ -288,25 +332,41 @@ class SafeActionExecutor:
                 target = self._resolve_safe_path(path, label="path")
                 files = [target] if target.is_file() else target.rglob("*")
                 matches = []
+                scanned_files = 0
+                skipped_large_files = 0
                 lowered = needle.lower()
                 for file_path in files:
-                    if len(matches) >= limit:
+                    if len(matches) >= limit or scanned_files >= MAX_STRUCTURED_SEARCH_FILES:
                         break
                     if not file_path.is_file() or is_secret_path(file_path):
                         continue
+                    scanned_files += 1
                     try:
-                        for lineno, line in enumerate(file_path.read_text(encoding="utf-8", errors="replace").splitlines(), start=1):
-                            if lowered in line.lower():
-                                matches.append({
-                                    "path": str(file_path.relative_to(self.root)),
-                                    "line": lineno,
-                                    "text": line[:300],
-                                })
-                                if len(matches) >= limit:
-                                    break
+                        if file_path.stat().st_size > MAX_STRUCTURED_SEARCH_FILE_BYTES:
+                            skipped_large_files += 1
+                            continue
+                        with file_path.open("r", encoding="utf-8", errors="replace") as handle:
+                            for lineno, line in enumerate(handle, start=1):
+                                if lowered in line.lower():
+                                    matches.append({
+                                        "path": str(file_path.relative_to(self.root)),
+                                        "line": lineno,
+                                        "text": line[:300],
+                                    })
+                                    if len(matches) >= limit:
+                                        break
                     except Exception:
                         continue
-                return {"ok": True, "allowed": True, "operation": op, "query": needle, "matches": matches}
+                return {
+                    "ok": True,
+                    "allowed": True,
+                    "operation": op,
+                    "query": needle,
+                    "matches": matches,
+                    "scanned_files": scanned_files,
+                    "skipped_large_files": skipped_large_files,
+                    "scan_limited": scanned_files >= MAX_STRUCTURED_SEARCH_FILES,
+                }
 
             if op in {"git_status", "git_diff_stat", "git_log"}:
                 args_by_op = {
@@ -422,9 +482,27 @@ class SafeActionExecutor:
                 stdout=self._clip_output(proc.stdout, "stdout"),
                 stderr=self._clip_output(proc.stderr, "stderr"),
             ).as_dict()
-        except Exception as exc:
+        except subprocess.TimeoutExpired as exc:
             return ActionResult(
                 executed=True,
+                allowed=True,
+                mode=self.mode,
+                command=command,
+                cwd=str(workdir),
+                error=f"TimeoutExpired: comando excedio {self.timeout_s:g}s",
+            ).as_dict()
+        except OSError as exc:
+            return ActionResult(
+                executed=False,
+                allowed=True,
+                mode=self.mode,
+                command=command,
+                cwd=str(workdir),
+                error=f"{type(exc).__name__}: {exc}",
+            ).as_dict()
+        except Exception as exc:
+            return ActionResult(
+                executed=False,
                 allowed=True,
                 mode=self.mode,
                 command=command,

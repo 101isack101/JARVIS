@@ -75,19 +75,19 @@ def _check_env() -> Check:
 
 def _check_agentic_code_env() -> Check:
     t0 = time.perf_counter()
-    model = os.environ.get("JARVIS_AGENTIC_CODE_MODEL", "gpt-5.5")
+    model = os.environ.get("JARVIS_TERRA_MODEL", "gpt-5.6-terra")
     if not os.environ.get("OPENAI_API_KEY"):
         return Check(
             name="agentic_code",
             ok=False,
-            detail=f"OPENAI_API_KEY ausente; ask_gpt55_code no podra usar {model}",
+            detail=f"OPENAI_API_KEY ausente; ask_terra_code no podra usar {model}",
             elapsed_ms=(time.perf_counter() - t0) * 1000,
             optional=True,
         )
     return Check(
         name="agentic_code",
         ok=True,
-        detail=f"ask_gpt55_code configurado con {model}",
+        detail=f"ask_terra_code configurado con {model}",
         elapsed_ms=(time.perf_counter() - t0) * 1000,
         optional=True,
     )

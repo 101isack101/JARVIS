@@ -63,7 +63,7 @@ class Executor:
         }
 
 
-def _service(tmp_path, reasoner, executor, events=None):
+def _service(tmp_path, reasoner, executor, events=None, tracker=None):
     (tmp_path / "README.md").write_text("hello", encoding="utf-8")
     store = MissionStore(tmp_path / "agent.db")
     policy = MissionPolicy(tmp_path)
@@ -80,6 +80,7 @@ def _service(tmp_path, reasoner, executor, events=None):
         report_builder=ReportBuilder(reasoner, artifacts=artifacts),
         config=AgentRuntimeConfig(enabled=True, max_steps=8, deadline_seconds=120),
         event_sink=(events.append if events is not None else None),
+        tracker=tracker,
     )
 
 
@@ -194,6 +195,55 @@ def test_event_sink_observes_event_after_commit(tmp_path):
     service.wait_for_terminal(created["mission_id"], 3)
     service.stop()
     assert observed and all(observed)
+
+
+def test_status_exposes_bounded_mission_window_telemetry(tmp_path):
+    class Tracker:
+        def __init__(self):
+            self.costs = {"gemini": 1.0, "claude": 2.0, "other": 0.0}
+            self.tokens = {"gemini": 100, "claude": 200, "other": 0}
+
+        def cost_by_provider(self):
+            return dict(self.costs)
+
+        def tokens_by_provider(self):
+            return dict(self.tokens)
+
+    class MeteredReasoner(QueueReasoner):
+        def __init__(self, tracker):
+            super().__init__([_plan(), "Hallazgo [step:s1]"])
+            self.tracker = tracker
+
+        def ask(self, *args, **kwargs):
+            self.tracker.costs["claude"] += 0.125
+            self.tracker.tokens["claude"] += 250
+            return super().ask(*args, **kwargs)
+
+    tracker = Tracker()
+    service = _service(tmp_path, MeteredReasoner(tracker), Executor(), tracker=tracker)
+    service.start()
+    created = service.create("Evaluar el estado técnico de JARVIS", max_steps=4)
+    mission = service.wait_for_terminal(created["mission_id"], timeout_s=3)
+    detail = service.status(created["mission_id"])
+
+    assert mission.status == MissionStatus.COMPLETED
+    assert detail["ok"] is True
+    assert detail["mission"]["telemetry"] == {
+        "duration_ms": detail["mission"]["duration_ms"],
+        "cost_usd": 0.25,
+        "tokens": 500,
+        "providers": {
+            "gemini": {"cost_usd": 0.0, "tokens": 0},
+            "claude": {"cost_usd": 0.25, "tokens": 500},
+            "other": {"cost_usd": 0.0, "tokens": 0},
+        },
+        "scope": "mission_window_delta",
+    }
+    assert detail["steps"][0]["duration_ms"] is not None
+    tracker.costs["claude"] += 5.0
+    tracker.tokens["claude"] += 5000
+    assert service.status(created["mission_id"])["mission"]["telemetry"] == detail["mission"]["telemetry"]
+    service.stop()
 
 
 def test_cancel_during_report_wins_over_completion(tmp_path):

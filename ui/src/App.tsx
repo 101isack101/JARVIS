@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { CSSProperties, RefObject } from 'react'
 import {
   Bot, Camera, CirclePower, Cloud, Clock3, Download, Gauge, Keyboard, MemoryStick,
@@ -12,7 +12,7 @@ import ApprovalModal from './components/ApprovalModal'
 import type {
   AgentToolEvent, AudioTelemetry, BudgetPayload, JarvisMode, JarvisState, LogEvent,
   ConversationMessage, RuntimeTelemetry, SystemStats as SystemStatsData, Weather,
-  MissionSummary,
+  MissionDetail, MissionEvent, MissionSummary,
 } from './types'
 
 const STATE_LABEL: Record<JarvisState, string> = {
@@ -206,9 +206,10 @@ function SystemStats({ stats, state, events, tools, onRefresh }: {
 
 const TERMINAL_MISSION = new Set(['completed', 'cancelled', 'blocked', 'failed'])
 
-function MissionPanel({ missions, onCancel }: {
+function MissionPanel({ missions, onCancel, onSelect }: {
   missions: MissionSummary[]
   onCancel: (missionId: string) => void
+  onSelect: (missionId: string) => void
 }) {
   const recent = [...missions].reverse().slice(0, 3)
   return (
@@ -220,12 +221,27 @@ function MissionPanel({ missions, onCancel }: {
           const progress = total ? Math.round(mission.completed_steps * 100 / total) : 0
           const cancellable = !TERMINAL_MISSION.has(mission.status)
           return (
-            <article className={`hud-mission hud-mission-${mission.status}`} key={mission.id}>
+            <article
+              className={`hud-mission hud-mission-${mission.status}`}
+              key={mission.id}
+              role="button"
+              tabIndex={0}
+              onClick={() => onSelect(mission.id)}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter' || event.key === ' ') {
+                  event.preventDefault()
+                  onSelect(mission.id)
+                }
+              }}
+            >
               <div className="hud-mission-topline">
                 <span>{mission.status.replace('_', ' ')}</span>
-                <b>{mission.completed_steps}/{total || 'â€”'}</b>
+                <b>{mission.completed_steps}/{total || '—'}</b>
                 {cancellable && (
-                  <button type="button" title="Cancelar misión" onClick={() => onCancel(mission.id)}>
+                  <button type="button" title="Cancelar misión" onClick={(event) => {
+                    event.stopPropagation()
+                    onCancel(mission.id)
+                  }}>
                     <X size={12} />
                   </button>
                 )}
@@ -238,6 +254,159 @@ function MissionPanel({ missions, onCancel }: {
         })}
       </div>
     </Panel>
+  )
+}
+
+function missionEventLabel(event: MissionEvent) {
+  const stamp = event.created_at ? new Date(event.created_at).toLocaleTimeString([], {
+    hour: '2-digit', minute: '2-digit', second: '2-digit',
+  }) : '—'
+  const summary = typeof event.payload?.summary === 'string' ? event.payload.summary : ''
+  return { stamp, summary }
+}
+
+function MissionControl({
+  missions, selectedMissionId, detail, onClose, onSelect, onRefresh, onCancel,
+}: {
+  missions: MissionSummary[]
+  selectedMissionId: string | null
+  detail: MissionDetail | null
+  onClose: () => void
+  onSelect: (missionId: string) => void
+  onRefresh: () => void
+  onCancel: (missionId: string) => void
+}) {
+  // A request for another mission may still be in flight. Do not briefly show
+  // its trace under the newly selected item.
+  const mission = detail?.mission?.id === selectedMissionId ? detail.mission : null
+  const telemetry = mission?.telemetry
+  const events = detail?.events ?? []
+  const cancellable = mission ? !TERMINAL_MISSION.has(mission.status) : false
+
+  return (
+    <div className="mission-control-backdrop" role="presentation" onMouseDown={onClose}>
+      <section
+        className="mission-control"
+        role="dialog"
+        aria-modal="true"
+        aria-label="JARVIS Mission Control"
+        onMouseDown={(event) => event.stopPropagation()}
+      >
+        <header className="mission-control-header">
+          <div>
+            <span>JARVIS</span>
+            <h2>Mission Control</h2>
+            <small>Observabilidad operativa · eventos persistidos · L1 read-only</small>
+          </div>
+          <div className="mission-control-header-actions">
+            <button type="button" onClick={onRefresh} title="Actualizar detalle"><RefreshCcw size={15} />Actualizar</button>
+            <button type="button" className="mission-control-close" onClick={onClose} title="Cerrar"><X size={17} /></button>
+          </div>
+        </header>
+        <div className="mission-control-layout">
+          <aside className="mission-control-list" aria-label="Misiones">
+            <div className="mission-control-list-title">Misiones ({missions.length})</div>
+            {!missions.length && <p>Sin misiones registradas.</p>}
+            {[...missions].reverse().map(item => (
+              <button
+                type="button"
+                key={item.id}
+                className={`mission-control-mission${selectedMissionId === item.id ? ' active' : ''}`}
+                onClick={() => onSelect(item.id)}
+              >
+                <span className={`mission-status-dot mission-status-${item.status}`} />
+                <div>
+                  <strong>{item.status.replace('_', ' ')}</strong>
+                  <p>{item.goal}</p>
+                  <small>{item.completed_steps}/{item.total_steps || '—'} pasos · {formatDuration(item.duration_ms ?? 0)}</small>
+                </div>
+              </button>
+            ))}
+          </aside>
+
+          <main className="mission-control-detail">
+            {!mission ? (
+              <div className="mission-control-empty">Selecciona una misión para inspeccionar su traza.</div>
+            ) : (
+              <>
+                <section className="mission-detail-heading">
+                  <div>
+                    <span className={`mission-status-badge mission-status-${mission.status}`}>{mission.status.replace('_', ' ')}</span>
+                    <h3>{mission.goal}</h3>
+                    <small>{mission.id} · creada {new Date(mission.created_at).toLocaleString()}</small>
+                  </div>
+                  {cancellable && (
+                    <button type="button" className="mission-control-cancel" onClick={() => onCancel(mission.id)}>
+                      <X size={14} />Cancelar misión
+                    </button>
+                  )}
+                </section>
+
+                <section className="mission-metrics-grid">
+                  <div><span>Duración</span><strong>{formatDuration(telemetry?.duration_ms ?? mission.duration_ms ?? 0)}</strong></div>
+                  <div><span>Pasos</span><strong>{mission.completed_steps}/{mission.total_steps || '—'}</strong></div>
+                  <div><span>Costo delta</span><strong>{telemetry?.cost_usd == null ? '—' : money(telemetry.cost_usd, 5)}</strong></div>
+                  <div><span>Tokens delta</span><strong>{telemetry?.tokens == null ? '—' : telemetry.tokens.toLocaleString()}</strong></div>
+                </section>
+
+                <section className="mission-section">
+                  <header><span>Plan y evidencia</span><small>{detail?.steps.length ?? 0} pasos</small></header>
+                  <ol className="mission-step-list">
+                    {detail?.steps.map(step => (
+                      <li key={step.id} className={`mission-step mission-step-${step.status}`}>
+                        <span className="mission-step-number">{step.ordinal}</span>
+                        <div>
+                          <strong>{step.operation}</strong>
+                          <p>{step.purpose}</p>
+                          <small>
+                            {step.status} · {formatDuration(step.duration_ms ?? 0)}
+                            {step.verification_status ? ` · verificación ${step.verification_status}` : ''}
+                            {step.artifact_id ? ` · evidencia ${step.artifact_id.slice(-8)}` : ''}
+                          </small>
+                          {step.error_code && <em>{step.error_code}: {step.error_message}</em>}
+                        </div>
+                      </li>
+                    ))}
+                  </ol>
+                </section>
+
+                <section className="mission-section mission-telemetry-section">
+                  <header><span>Telemetría de misión</span><small>{telemetry?.scope === 'mission_window_delta' ? 'ventana de misión / sesión' : 'duración persistida'}</small></header>
+                  <div className="mission-provider-grid">
+                    {['gemini', 'claude', 'other'].map(provider => {
+                      const metric = telemetry?.providers?.[provider]
+                      return <div key={provider}><span>{provider}</span><strong>{metric ? money(metric.cost_usd, 5) : '—'}</strong><small>{metric ? `${metric.tokens.toLocaleString()} tokens` : 'sin delta'}</small></div>
+                    })}
+                  </div>
+                </section>
+
+                <section className="mission-section">
+                  <header><span>Timeline de ejecución</span><small>{events.length} eventos</small></header>
+                  <div className="mission-event-list">
+                    {[...events].reverse().map(event => {
+                      const meta = missionEventLabel(event)
+                      return (
+                        <article key={`${event.id}-${event.event_type}`} className={`mission-event mission-event-${event.level}`}>
+                          <time>{meta.stamp}</time>
+                          <div><strong>{event.event_type}</strong><p>{meta.summary || event.step_id || 'Evento persistido'}</p></div>
+                        </article>
+                      )
+                    })}
+                  </div>
+                </section>
+
+                {mission.final_summary && (
+                  <section className="mission-section mission-final-summary">
+                    <header><span>Resultado verificado</span><small>con referencias de evidencia</small></header>
+                    <ReactMarkdown remarkPlugins={[remarkGfm]}>{mission.final_summary}</ReactMarkdown>
+                  </section>
+                )}
+              </>
+            )}
+          </main>
+        </div>
+      </section>
+    </div>
   )
 }
 
@@ -560,7 +729,7 @@ function SettingsMenu({ version, online, mode, connectionDetail, onClose, onShut
   )
 }
 
-function TopBar({ version, online, now, mode, connectionDetail, weather, settingsOpen, onToggleSettings, onShutdown }: {
+function TopBar({ version, online, now, mode, connectionDetail, weather, settingsOpen, missionControlOpen, onToggleSettings, onToggleMissionControl, onShutdown }: {
   version: string
   online: boolean
   now: Date
@@ -568,7 +737,9 @@ function TopBar({ version, online, now, mode, connectionDetail, weather, setting
   connectionDetail: string
   weather: Weather | null
   settingsOpen: boolean
+  missionControlOpen: boolean
   onToggleSettings: () => void
+  onToggleMissionControl: () => void
   onShutdown: () => void
 }) {
   return (
@@ -593,6 +764,13 @@ function TopBar({ version, online, now, mode, connectionDetail, weather, setting
           <small>{weather ? weather.place.split(',')[0] : '…'}</small>
         </div>
         <div className="hud-settings-anchor">
+          <button
+            className={`hud-icon-button hud-mission-control-button${missionControlOpen ? ' hud-icon-button-on' : ''}`}
+            type="button" title="Mission Control" aria-label="Mission Control"
+            aria-expanded={missionControlOpen} onClick={onToggleMissionControl}
+          >
+            <Bot size={18} />
+          </button>
           <button
             className={`hud-icon-button${settingsOpen ? ' hud-icon-button-on' : ''}`}
             type="button" title="Settings" aria-label="Settings"
@@ -652,6 +830,8 @@ export default function App() {
   const { now, uptimeMs } = useClock()
   const inputRef = useRef<HTMLInputElement>(null)
   const [settingsOpen, setSettingsOpen] = useState(false)
+  const [missionControlOpen, setMissionControlOpen] = useState(false)
+  const [selectedMissionId, setSelectedMissionId] = useState<string | null>(null)
   const [extractLabel, setExtractLabel] = useState('Extraer conversacion')
   const connected = ui.connectionStatus === 'connected'
   const commands = useMemo(
@@ -661,9 +841,9 @@ export default function App() {
 
   // Todo comando hacia el backend requiere el token de UI del snapshot. Si aun
   // no llego (sesion arrancando), el control queda inerte en vez de fallar.
-  const dispatch = (command: string, args: Record<string, unknown> = {}) => {
+  const dispatch = useCallback((command: string, args: Record<string, unknown> = {}) => {
     if (ui.uiToken) void sendCommand(command, ui.uiToken, args)
-  }
+  }, [sendCommand, ui.uiToken])
 
   const approve = () => {
     if (ui.pendingApproval) resolveApproval(ui.pendingApproval.id, true, ui.uiToken)
@@ -718,8 +898,33 @@ export default function App() {
   const refreshStats = () => dispatch('refreshStats')
   const refreshWeather = () => dispatch('refreshWeather')
   const cancelMission = (missionId: string) => dispatch('cancelMission', { missionId })
+  const selectMission = (missionId: string) => {
+    setSelectedMissionId(missionId)
+    setMissionControlOpen(true)
+  }
+  const refreshMission = () => {
+    const missionId = selectedMissionId ?? ui.missions[ui.missions.length - 1]?.id
+    if (missionId) dispatch('missionDetail', { missionId })
+  }
+  const toggleMissionControl = () => {
+    if (!missionControlOpen) {
+      const missionId = selectedMissionId ?? ui.missions[ui.missions.length - 1]?.id
+      if (missionId) {
+        setSelectedMissionId(missionId)
+      }
+    }
+    setMissionControlOpen(open => !open)
+  }
   const shutdown = () => { dispatch('close'); setSettingsOpen(false) }
   const focusInput = () => inputRef.current?.focus()
+
+  useEffect(() => {
+    if (!missionControlOpen || !selectedMissionId || !ui.uiToken) return
+    const refresh = () => dispatch('missionDetail', { missionId: selectedMissionId })
+    refresh()
+    const interval = window.setInterval(refresh, 1500)
+    return () => window.clearInterval(interval)
+  }, [dispatch, missionControlOpen, selectedMissionId, ui.uiToken])
 
   return (
     <div className="hud-shell">
@@ -731,7 +936,9 @@ export default function App() {
         connectionDetail={ui.connectionDetail}
         weather={ui.weather}
         settingsOpen={settingsOpen}
+        missionControlOpen={missionControlOpen}
         onToggleSettings={() => setSettingsOpen(o => !o)}
+        onToggleMissionControl={toggleMissionControl}
         onShutdown={shutdown}
       />
       <div className="hud-layout">
@@ -743,7 +950,7 @@ export default function App() {
             tools={ui.agentTools}
             onRefresh={refreshStats}
           />
-          <MissionPanel missions={ui.missions} onCancel={cancelMission} />
+          <MissionPanel missions={ui.missions} onCancel={cancelMission} onSelect={selectMission} />
           <TelemetryPanel telemetry={ui.runtimeTelemetry} budget={ui.budget} />
           <WeatherPanel weather={ui.weather} onRefresh={refreshWeather} />
           <CameraWidget active={ui.cameraActive} frame={ui.cameraFrame} focus={ui.cameraFocus} />
@@ -760,6 +967,17 @@ export default function App() {
           canSend={connected}
         />
       </div>
+      {missionControlOpen && (
+        <MissionControl
+          missions={ui.missions}
+          selectedMissionId={selectedMissionId}
+          detail={ui.missionDetail}
+          onClose={() => setMissionControlOpen(false)}
+          onSelect={selectMission}
+          onRefresh={refreshMission}
+          onCancel={cancelMission}
+        />
+      )}
       <BottomControls
         onCamera={toggleCamera}
         onMic={toggleMic}

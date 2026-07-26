@@ -1,9 +1,12 @@
+from io import BytesIO
+
 from telemetry.budgets import BudgetGate, BudgetStatus, ProviderBudget
 from telemetry.tracker import TokenTracker
 from types import SimpleNamespace
 from overlay.web_overlay import (
     WebJarvisOverlay,
     _BridgeHandler,
+    MAX_JSON_REQUEST_BYTES,
     _audio_emit_interval_from_env,
     _camera_emit_interval_from_env,
     _provider_payload,
@@ -84,6 +87,41 @@ def test_bridge_post_authorization_requires_session_token():
 
     handler.headers = {"X-Jarvis-Ui-Token": "secret-token"}
     assert handler._authorized({}) is True
+
+
+def test_bridge_rejects_non_loopback_host_header():
+    """DNS rebinding: /state entrega el uiToken, asi que el Host es la barrera."""
+    handler = object.__new__(_BridgeHandler)
+    handler.server = SimpleNamespace(server_address=("127.0.0.1", 8765))
+
+    for bad in ("", "evil.com", "evil.com:8765", "127.0.0.1.evil.com:8765"):
+        handler.headers = {"Host": bad} if bad else {}
+        assert handler._host_allowed() is False, bad
+
+    for good in ("127.0.0.1:8765", "localhost:8765", "127.0.0.1", "[::1]:8765"):
+        handler.headers = {"Host": good}
+        assert handler._host_allowed() is True, good
+
+
+def test_bridge_allows_host_matching_explicit_bind_address():
+    handler = object.__new__(_BridgeHandler)
+    handler.server = SimpleNamespace(server_address=("192.168.1.50", 8765))
+    handler.headers = {"Host": "192.168.1.50:8765"}
+    assert handler._host_allowed() is True
+
+
+def test_bridge_json_body_rejects_invalid_or_oversized_content_length():
+    handler = object.__new__(_BridgeHandler)
+
+    handler.headers = {"Content-Length": "not-a-number"}
+    handler.rfile = BytesIO(b'{"command":"close"}')
+    assert handler._read_json() == {}
+
+    body = b"x" * (MAX_JSON_REQUEST_BYTES + 1)
+    handler.headers = {"Content-Length": str(len(body))}
+    handler.rfile = BytesIO(body)
+    assert handler._read_json() == {}
+    assert handler.rfile.tell() == 0
 
 
 def test_export_conversation_writes_markdown(tmp_path, monkeypatch):

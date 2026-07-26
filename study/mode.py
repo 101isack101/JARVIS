@@ -7,6 +7,7 @@ import threading
 import time
 import uuid
 from dataclasses import dataclass
+from typing import Callable
 
 from actions.chrome_reader import ChromeReader
 from security.secret_filter import redact_secrets
@@ -37,13 +38,21 @@ class StudyModeController:
     la evidencia pendiente y la persiste en Obsidian.
     """
 
-    def __init__(self, *, vault, reasoner=None, config: StudyModeConfig | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        vault,
+        reasoner=None,
+        config: StudyModeConfig | None = None,
+        on_flush_done: Callable[[dict], None] | None = None,
+    ) -> None:
         self.vault = vault
         self.reasoner = reasoner
         self.config = config or StudyModeConfig.from_env()
         self.reader = ChromeReader()
         self.writer = StudyObsidianWriter(vault)
         self.synthesizer = StudySynthesizer(reasoner=reasoner)
+        self.on_flush_done = on_flush_done
         self._ledger: StudyLedger | None = None
         self._note_abs_path = None
         self._lock = threading.RLock()
@@ -340,6 +349,11 @@ class StudyModeController:
                     "evidence_count": result.get("evidence_count", len(pending)),
                     "finished_at": time.time(),
                 }
+            if self.on_flush_done is not None:
+                try:
+                    self.on_flush_done(dict(result))
+                except Exception:
+                    pass
 
         self._flush_thread = threading.Thread(
             target=_worker,

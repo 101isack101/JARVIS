@@ -66,6 +66,19 @@ export type MissionStatus =
   | 'cancel_requested' | 'recovering'
   | 'completed' | 'cancelled' | 'blocked' | 'failed'
 
+export interface MissionProviderTelemetry {
+  cost_usd: number
+  tokens: number
+}
+
+export interface MissionTelemetry {
+  duration_ms: number | null
+  cost_usd: number | null
+  tokens: number | null
+  providers: Record<string, MissionProviderTelemetry>
+  scope: 'mission_window_delta' | 'duration_only' | string
+}
+
 export interface MissionSummary {
   id: string
   goal: string
@@ -74,10 +87,31 @@ export interface MissionSummary {
   created_at: string
   updated_at: string
   finished_at: string | null
+  duration_ms: number | null
   completed_steps: number
   total_steps: number
   error_code: string | null
   final_summary: string | null
+  telemetry: MissionTelemetry
+}
+
+export interface MissionStep {
+  id: string
+  mission_id: string
+  ordinal: number
+  operation: string
+  arguments: Record<string, unknown>
+  purpose: string
+  expected_evidence: string
+  status: 'pending' | 'running' | 'completed' | 'cancelled' | 'blocked' | 'failed'
+  attempt_count: number
+  started_at: string | null
+  finished_at: string | null
+  duration_ms: number | null
+  artifact_id: string | null
+  verification_status: string | null
+  error_code: string | null
+  error_message: string | null
 }
 
 export interface MissionEvent {
@@ -88,6 +122,15 @@ export interface MissionEvent {
   level: LogLevel
   payload: Record<string, unknown>
   created_at: string
+}
+
+export interface MissionDetail {
+  ok: boolean
+  error_code: string | null
+  error: string
+  mission: MissionSummary | null
+  steps: MissionStep[]
+  events: MissionEvent[]
 }
 
 export interface ProviderRuntimeTelemetry {
@@ -170,6 +213,7 @@ export interface JarvisSnapshot {
   agentEvents: AgentToolEvent[]
   missions?: MissionSummary[]
   missionEvents?: MissionEvent[]
+  missionDetail?: MissionDetail | null
   audioTelemetry: AudioTelemetry | null
   runtimeTelemetry?: RuntimeTelemetry | null
   latency: string[]

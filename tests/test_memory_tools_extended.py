@@ -22,7 +22,7 @@ class FakeReasoner:
 
 
 class FakeCodeReasoner:
-    model = "gpt-5.5"
+    model = "gpt-5.6-terra"
     configured = True
 
     def ask(self, prompt, context_extra=None, max_output_tokens=1600):
@@ -64,7 +64,7 @@ def test_dispatcher_exposes_claude_and_modes(tmp_path):
     )
     dispatcher = ToolDispatcher(ctx)
 
-    code = dispatcher.call("ask_gpt55_code", {"prompt": "genera codigo"})
+    code = dispatcher.call("ask_terra_code", {"prompt": "genera codigo"})
     deep = dispatcher.call("ask_claude_deep", {"prompt": "razona esto"})
     mode = dispatcher.call("jarvis_set_mode", {"mode": "debugging"})
     agentic = dispatcher.call("jarvis_set_mode", {"mode": "agentic"})
@@ -73,16 +73,16 @@ def test_dispatcher_exposes_claude_and_modes(tmp_path):
     security = dispatcher.call("jarvis_security_status", {})
 
     assert "jarvis_session_recall" in dispatcher.tool_names
-    assert "ask_gpt55_code" in dispatcher.tool_names
+    assert "ask_terra_code" in dispatcher.tool_names
     assert code["ok"] is True
-    assert code["model"] == "gpt-5.5"
+    assert code["model"] == "gpt-5.6-terra"
     assert "code:" in code["text"]
     assert deep["ok"] is True
     assert "deep:" in deep["text"]
     assert mode["changed"] is True
     assert agentic["changed"] is True
     assert agentic["mode"] == "agentic"
-    assert dispatcher.is_async("ask_gpt55_code") is True
+    assert dispatcher.is_async("ask_terra_code") is True
     assert browser["executed"] is True
     assert browser["url"] == "about:blank"
     assert mcp["tool"] == "obsidian_create_folder"

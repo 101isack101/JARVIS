@@ -68,6 +68,12 @@ class AgentRuntimeConfig:
         )
 
 
+@dataclass(frozen=True)
+class _MissionTelemetryBaseline:
+    costs: dict[str, float]
+    tokens: dict[str, int]
+
+
 class AgentRuntimeService:
     def __init__(
         self,
@@ -82,6 +88,7 @@ class AgentRuntimeService:
         config: AgentRuntimeConfig | None = None,
         event_sink: EventSink | None = None,
         budget_check: Callable[[], bool] | None = None,
+        tracker: Any | None = None,
     ) -> None:
         self.root = Path(root).resolve()
         self.store = store
@@ -93,12 +100,16 @@ class AgentRuntimeService:
         self.config = config or AgentRuntimeConfig()
         self.event_sink = event_sink
         self.budget_check = budget_check
+        self.tracker = tracker
         self._queue: queue.Queue[str | None] = queue.Queue()
         self._queued_ids: set[str] = set()
         self._queue_lock = threading.Lock()
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
         self._active_id: str | None = None
+        self._telemetry_baselines: dict[str, _MissionTelemetryBaseline] = {}
+        self._final_telemetry: dict[str, dict[str, Any]] = {}
+        self._telemetry_lock = threading.Lock()
 
     @property
     def running(self) -> bool:
@@ -179,14 +190,25 @@ class AgentRuntimeService:
             return {"ok": False, "error_code": "MISSION_NOT_FOUND", "error": mission_id}
         return {
             "ok": True,
-            "mission": _mission_dict(mission),
+            "mission": _mission_summary(
+                self.store,
+                mission,
+                telemetry=self._telemetry_for(mission),
+                include_summary=True,
+            ),
             "steps": [_step_dict(step) for step in self.store.get_steps(mission_id)],
             "events": [_event_dict(event) for event in self.store.events(mission_id, limit=50)],
         }
 
     def list(self, limit: int = 20) -> dict[str, Any]:
         missions = self.store.list_missions(limit=limit)
-        return {"ok": True, "missions": [_mission_summary(self.store, item) for item in missions]}
+        return {
+            "ok": True,
+            "missions": [
+                _mission_summary(self.store, item, telemetry=self._telemetry_for(item))
+                for item in missions
+            ],
+        }
 
     def wait_for_terminal(self, mission_id: str, timeout_s: float = 5.0) -> Mission:
         deadline = time.monotonic() + timeout_s
@@ -226,6 +248,9 @@ class AgentRuntimeService:
 
     def _process(self, mission_id: str) -> None:
         mission = self.store.get_mission(mission_id)
+        # Start the accounting window only when this worker actually owns the
+        # mission, so FIFO queue time never absorbs another mission's usage.
+        self._ensure_telemetry_baseline(mission_id)
         if mission.status in TERMINAL_MISSION_STATUSES:
             return
         if mission.cancel_requested or mission.status == MissionStatus.CANCEL_REQUESTED:
@@ -499,10 +524,77 @@ class AgentRuntimeService:
             return
         try:
             payload = _event_dict(event)
-            payload["mission"] = _mission_summary(self.store, self.store.get_mission(event.mission_id))
+            mission = self.store.get_mission(event.mission_id)
+            payload["mission"] = _mission_summary(
+                self.store,
+                mission,
+                telemetry=self._telemetry_for(mission),
+            )
             self.event_sink(payload)
         except Exception as exc:
             log.warning("event_sink fallo: {}", exc)
+
+    def _ensure_telemetry_baseline(self, mission_id: str) -> None:
+        if self.tracker is None:
+            return
+        with self._telemetry_lock:
+            if mission_id in self._telemetry_baselines:
+                return
+        try:
+            baseline = _MissionTelemetryBaseline(
+                costs=dict(self.tracker.cost_by_provider()),
+                tokens=dict(self.tracker.tokens_by_provider()),
+            )
+            with self._telemetry_lock:
+                self._telemetry_baselines.setdefault(mission_id, baseline)
+        except Exception as exc:
+            log.warning("telemetria de mision no disponible: {}", exc)
+
+    def _telemetry_for(self, mission: Mission) -> dict[str, Any]:
+        duration_ms = _duration_ms(mission.started_at, mission.finished_at)
+        with self._telemetry_lock:
+            frozen = self._final_telemetry.get(mission.id)
+            baseline = self._telemetry_baselines.get(mission.id)
+        if frozen is not None:
+            return frozen
+        if baseline is None or self.tracker is None:
+            return {
+                "duration_ms": duration_ms,
+                "cost_usd": None,
+                "tokens": None,
+                "providers": {},
+                "scope": "duration_only",
+            }
+        try:
+            costs = dict(self.tracker.cost_by_provider())
+            tokens = dict(self.tracker.tokens_by_provider())
+        except Exception:
+            return {
+                "duration_ms": duration_ms,
+                "cost_usd": None,
+                "tokens": None,
+                "providers": {},
+                "scope": "duration_only",
+            }
+        names = ("gemini", "claude", "other")
+        providers = {
+            name: {
+                "cost_usd": round(max(0.0, float(costs.get(name, 0.0)) - float(baseline.costs.get(name, 0.0))), 6),
+                "tokens": max(0, int(tokens.get(name, 0)) - int(baseline.tokens.get(name, 0))),
+            }
+            for name in names
+        }
+        telemetry = {
+            "duration_ms": duration_ms,
+            "cost_usd": round(sum(item["cost_usd"] for item in providers.values()), 6),
+            "tokens": sum(item["tokens"] for item in providers.values()),
+            "providers": providers,
+            "scope": "mission_window_delta",
+        }
+        if mission.status in TERMINAL_MISSION_STATUSES:
+            with self._telemetry_lock:
+                return self._final_telemetry.setdefault(mission.id, telemetry)
+        return telemetry
 
 
 def build_agent_runtime(
@@ -513,6 +605,7 @@ def build_agent_runtime(
     config: AgentRuntimeConfig,
     event_sink: EventSink | None = None,
     budget_check: Callable[[], bool] | None = None,
+    tracker: Any | None = None,
 ) -> AgentRuntimeService:
     store = MissionStore(root / "data" / "agent_runtime" / "agent_runtime.db")
     policy = MissionPolicy(root)
@@ -538,18 +631,14 @@ def build_agent_runtime(
         config=config,
         event_sink=event_sink,
         budget_check=budget_check,
+        tracker=tracker,
     )
-
-
-def _mission_dict(mission: Mission) -> dict[str, Any]:
-    data = asdict(mission)
-    data["status"] = mission.status.value
-    return data
 
 
 def _step_dict(step) -> dict[str, Any]:
     data = asdict(step)
     data["status"] = step.status.value
+    data["duration_ms"] = _duration_ms(step.started_at, step.finished_at)
     return data
 
 
@@ -557,9 +646,17 @@ def _event_dict(event: MissionEvent) -> dict[str, Any]:
     return asdict(event)
 
 
-def _mission_summary(store: MissionStore, mission: Mission) -> dict[str, Any]:
+def _mission_summary(
+    store: MissionStore,
+    mission: Mission,
+    *,
+    telemetry: dict[str, Any] | None = None,
+    include_summary: bool = False,
+) -> dict[str, Any]:
     steps = store.get_steps(mission.id)
     completed = sum(step.status == StepStatus.COMPLETED for step in steps)
+    summary_limit = 4000 if include_summary else 800
+    final_summary = mission.final_summary or ""
     return {
         "id": mission.id,
         "goal": mission.goal,
@@ -567,12 +664,32 @@ def _mission_summary(store: MissionStore, mission: Mission) -> dict[str, Any]:
         "autonomy_level": mission.autonomy_level,
         "created_at": mission.created_at,
         "updated_at": mission.updated_at,
+        "started_at": mission.started_at,
         "finished_at": mission.finished_at,
+        "duration_ms": _duration_ms(mission.started_at, mission.finished_at),
         "completed_steps": completed,
         "total_steps": len(steps),
         "error_code": mission.error_code,
         "final_summary": (
-            mission.final_summary[:800] + ("…" if len(mission.final_summary) > 800 else "")
-            if mission.final_summary else None
+            final_summary[:summary_limit] + ("…" if len(final_summary) > summary_limit else "")
+            if final_summary else None
         ),
+        "telemetry": telemetry or {
+            "duration_ms": _duration_ms(mission.started_at, mission.finished_at),
+            "cost_usd": None,
+            "tokens": None,
+            "providers": {},
+            "scope": "duration_only",
+        },
     }
+
+
+def _duration_ms(started_at: str | None, finished_at: str | None) -> int | None:
+    if not started_at:
+        return None
+    try:
+        started = datetime.fromisoformat(started_at.replace("Z", "+00:00"))
+        ended = datetime.fromisoformat(finished_at.replace("Z", "+00:00")) if finished_at else datetime.now(timezone.utc)
+    except (ValueError, AttributeError):
+        return None
+    return max(0, int((ended - started).total_seconds() * 1000))
