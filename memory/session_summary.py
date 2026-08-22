@@ -194,7 +194,8 @@ def synthesize_and_save(
         "project": "[[03-PROJECTS/jarvis]]",
         "date": now.strftime("%Y-%m-%d"),
         "session_id": session_id,
-        "generated_by": "claude-sonnet-4-6",
+        # Del reasoner real, no hardcodeado: asi no queda stale al migrar modelo.
+        "generated_by": getattr(reasoner, "model", "desconocido"),
     }
     body = f"# Sesion {now.strftime('%Y-%m-%d %H:%M')}\n\n{synthesized}\n"
 

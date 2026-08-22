@@ -84,6 +84,52 @@ def _service(tmp_path, reasoner, executor, events=None, tracker=None):
     )
 
 
+class TemplateExecutor:
+    def run_structured(self, operation, **kwargs):
+        if operation == "list_dir":
+            return {
+                "ok": True,
+                "allowed": True,
+                "operation": "list_dir",
+                "items": [{"path": "README.md", "type": "file"}],
+            }
+        if operation == "read_file":
+            return {
+                "ok": True,
+                "allowed": True,
+                "operation": "read_file",
+                "path": "README.md",
+                "content": "hello",
+                "truncated": False,
+            }
+        if operation == "search_text":
+            return {
+                "ok": True,
+                "allowed": True,
+                "operation": "search_text",
+                "matches": [{"path": "README.md", "line": 1}],
+            }
+        return {
+            "ok": True,
+            "allowed": True,
+            "operation": operation,
+            "returncode": 0,
+            "stdout": "ok",
+        }
+
+
+def test_create_without_reasoner_uses_template_plan(tmp_path):
+    events = []
+    service = _service(tmp_path, None, TemplateExecutor(), events)
+    service.start()
+    created = service.create("Evaluar el estado técnico de JARVIS", max_steps=3)
+    mission = service.wait_for_terminal(created["mission_id"], timeout_s=3)
+    service.stop()
+    assert created["ok"] is True
+    assert mission.status == MissionStatus.COMPLETED
+    assert "[step:s1]" in (mission.final_summary or "")
+
+
 def test_create_returns_before_slow_planner_and_completes(tmp_path):
     reasoner = QueueReasoner([_plan(), "Hallazgo [step:s1]"], delay=0.15)
     events = []

@@ -33,6 +33,7 @@ export interface BudgetPayload {
   period: string
   hardStop: boolean
   gemini: ProviderBudget
+  grok?: ProviderBudget
   claude: ProviderBudget
   totalUsd: number
 }
@@ -164,6 +165,7 @@ export interface RuntimeTelemetry {
   totalTokensPerMin: number
   totalUsdPerMin: number
   gemini: ProviderRuntimeTelemetry
+  grok?: ProviderRuntimeTelemetry
   claude: ProviderRuntimeTelemetry
   other: ProviderRuntimeTelemetry
   camera: CameraRuntimeTelemetry
@@ -199,7 +201,7 @@ export interface ApprovalPayload {
 
 export interface JarvisSnapshot {
   version: string
-  uiToken: string
+  uiToken?: string
   state: JarvisState
   mode: JarvisMode
   connection: { status: ConnectionStatus; detail: string }

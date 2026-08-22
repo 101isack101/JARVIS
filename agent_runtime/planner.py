@@ -29,11 +29,13 @@ class MissionPlanner:
 
     @property
     def model(self) -> str | None:
+        if self.reasoner is None or not getattr(self.reasoner, "configured", True):
+            return "template-l1"
         return getattr(self.reasoner, "model", None)
 
     def plan(self, *, goal: str, max_steps: int, deadline_seconds: int) -> PlanContract:
         if self.reasoner is None or not getattr(self.reasoner, "configured", True):
-            raise PlannerError("code_reasoner no configurado", code="PLANNER_UNAVAILABLE")
+            return self.fallback_plan(goal=goal, max_steps=max_steps)
         prompt = self._prompt(goal=goal, max_steps=max_steps, deadline_seconds=deadline_seconds)
         raw_text = self._ask(prompt)
         try:
@@ -91,6 +93,59 @@ class MissionPlanner:
             "steps:[{step_id:string, operation:string, arguments:object, purpose:string, "
             "expected_evidence:string}], report_questions:[string]}. "
             "Usa IDs s1,s2,...; cada paso debe producir evidencia útil para la meta."
+        )
+
+    @staticmethod
+    def fallback_plan(*, goal: str, max_steps: int) -> PlanContract:
+        """Plan L1 determinista cuando Terra/Grok no estan configurados."""
+        query = (goal or "").strip()[:200] or "JARVIS"
+        candidates = [
+            {
+                "step_id": "s1",
+                "operation": "list_dir",
+                "arguments": {"path": ".", "limit": 80},
+                "purpose": "Listar la raiz del proyecto",
+                "expected_evidence": "Lista de archivos y carpetas",
+            },
+            {
+                "step_id": "s2",
+                "operation": "read_file",
+                "arguments": {"path": "README.md", "max_chars": 8000},
+                "purpose": "Leer el README del repositorio",
+                "expected_evidence": "Contenido de README.md",
+            },
+            {
+                "step_id": "s3",
+                "operation": "search_text",
+                "arguments": {"query": query, "limit": 40, "max_chars": 8000},
+                "purpose": "Buscar texto relacionado con la meta",
+                "expected_evidence": "Matches de search_text",
+            },
+            {
+                "step_id": "s4",
+                "operation": "git_status",
+                "arguments": {},
+                "purpose": "Ver el estado git del repositorio",
+                "expected_evidence": "Salida de git status",
+            },
+            {
+                "step_id": "s5",
+                "operation": "git_log",
+                "arguments": {"limit": 15},
+                "purpose": "Revisar commits recientes",
+                "expected_evidence": "git log acotado",
+            },
+        ]
+        cap = max(1, min(int(max_steps or 1), len(candidates)))
+        return PlanContract.from_dict(
+            {
+                "version": 1,
+                "goal": goal,
+                "assumptions": ["plan plantilla L1 sin reasoner"],
+                "steps": candidates[:cap],
+                "report_questions": ["Que evidencia respalda la meta?"],
+            },
+            max_steps=cap,
         )
 
     @staticmethod

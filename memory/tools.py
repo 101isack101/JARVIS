@@ -38,6 +38,7 @@ from .obsidian_vault import ObsidianVault, VaultError
 from .rag import VaultRAG
 from .self_improvement import write_critique
 from .tool_declarations import all_function_declarations, make_tool_object
+from .tool_sets import is_tool_allowed_for_mode, tools_for_mode
 from .session_summary import current_session_recall as recall_current_session
 from .session_summary import search_session_summaries
 from .triage import triage_memory, update_project_memory_card
@@ -87,6 +88,8 @@ class ToolContext:
     # Aviso centralizado para trabajos que terminan fuera del turno actual.
     # Firma: (title, detail, ok=True) -> None.
     background_notifier: Callable[..., None] | None = None
+    # Callback al cambiar modo de trabajo. Firma: (mode: str) -> None.
+    on_mode_changed: Callable[[str], None] | None = None
 
 
 # =====================================================================
@@ -349,7 +352,7 @@ def jarvis_link(ctx: ToolContext, note_from: str, note_to: str) -> dict:
         return {"linked": False, "error": str(e)}
 
 
-def _format_claude_response(model: str, r) -> dict:
+def _format_grok_response(model: str, r) -> dict:
     return {
         "ok": True,
         "model": model,
@@ -388,11 +391,11 @@ def _terra_code_preflight(ctx: ToolContext) -> dict | None:
     return None
 
 
-def _claude_preflight(ctx: ToolContext) -> dict | None:
+def _grok_preflight(ctx: ToolContext) -> dict | None:
     if ctx.reasoner is None:
-        return {"ok": False, "error": "ClaudeReasoner no configurado"}
-    if ctx.gate is not None and ctx.tracker is not None and not ctx.gate.can_invoke(ctx.tracker, "claude"):
-        return {"ok": False, "error": "Claude bloqueado por budget"}
+        return {"ok": False, "error": "GrokReasoner no configurado"}
+    if ctx.gate is not None and ctx.tracker is not None and not ctx.gate.can_invoke(ctx.tracker, "grok"):
+        return {"ok": False, "error": "Grok bloqueado por budget"}
     return None
 
 
@@ -422,20 +425,23 @@ def _attribute_usage(ctx: ToolContext, prompt: str, response_text: str) -> None:
         pass  # jamas degrada la respuesta
 
 
-def ask_claude_deep(
+def ask_grok_deep(
     ctx: ToolContext,
     prompt: str,
     context_extra: str | None = None,
     max_tokens: int = 450,
 ) -> dict:
-    err = _claude_preflight(ctx)
+    err = _grok_preflight(ctx)
     if err is not None:
         return err
     max_tokens = max(128, min(int(max_tokens or 450), 2048))
     merged = _augmented_context(ctx, prompt, context_extra)
     r = ctx.reasoner.ask(prompt, context_extra=merged, max_tokens=max_tokens)
     _attribute_usage(ctx, prompt, getattr(r, "text", "") or "")
-    return _format_claude_response(ctx.reasoner.model, r)
+    return _format_grok_response(ctx.reasoner.model, r)
+
+
+ask_claude_deep = ask_grok_deep
 
 
 def ask_terra_code(
@@ -483,7 +489,7 @@ async def ask_terra_code_async(
     return _format_terra_code_response(ctx.code_reasoner.model, r)
 
 
-async def ask_claude_deep_async(
+async def ask_grok_deep_async(
     ctx: ToolContext,
     prompt: str,
     context_extra: str | None = None,
@@ -491,14 +497,17 @@ async def ask_claude_deep_async(
 ) -> dict:
     """Version async usada por el dispatcher para que asyncio.wait_for cancele
     la request HTTP de verdad cuando expira el timeout."""
-    err = _claude_preflight(ctx)
+    err = _grok_preflight(ctx)
     if err is not None:
         return err
     max_tokens = max(128, min(int(max_tokens or 450), 2048))
     merged = _augmented_context(ctx, prompt, context_extra)
     r = await ctx.reasoner.ask_async(prompt, context_extra=merged, max_tokens=max_tokens)
     _attribute_usage(ctx, prompt, getattr(r, "text", "") or "")
-    return _format_claude_response(ctx.reasoner.model, r)
+    return _format_grok_response(ctx.reasoner.model, r)
+
+
+ask_claude_deep_async = ask_grok_deep_async
 
 
 def screen_look(ctx: ToolContext, reason: str = "") -> dict:
@@ -1216,10 +1225,23 @@ def jarvis_open_powershell(ctx: ToolContext, cwd: str | None = None) -> dict:
     return ctx.actions.open_powershell(cwd=cwd)
 
 
+def _with_mode_tools(result: dict) -> dict:
+    mode = result.get("mode")
+    if mode:
+        result["allowed_tools"] = sorted(tools_for_mode(str(mode)))
+    return result
+
+
 def jarvis_set_mode(ctx: ToolContext, mode: str) -> dict:
     if ctx.modes is None:
         return {"changed": False, "error": "ModeManager no configurado"}
-    return ctx.modes.set_mode(mode)
+    result = _with_mode_tools(ctx.modes.set_mode(mode))
+    if result.get("changed") and ctx.on_mode_changed is not None:
+        try:
+            ctx.on_mode_changed(str(result.get("mode") or mode))
+        except Exception:
+            pass
+    return result
 
 
 # Alias de lenguaje natural -> modo de escucha canonico (PTT/LIBRE).
@@ -1253,7 +1275,7 @@ def jarvis_listen_mode(ctx: ToolContext, mode: str) -> dict:
 def jarvis_get_mode(ctx: ToolContext) -> dict:
     if ctx.modes is None:
         return {"error": "ModeManager no configurado"}
-    return ctx.modes.get_mode()
+    return _with_mode_tools(ctx.modes.get_mode())
 
 
 def english_practice(
@@ -1625,7 +1647,8 @@ class ToolDispatcher:
             "jarvis_browse": lambda **kw: jarvis_browse(ctx, **kw),
             "jarvis_link": lambda **kw: jarvis_link(ctx, **kw),
             "ask_terra_code": lambda **kw: ask_terra_code(ctx, **kw),
-            "ask_claude_deep": lambda **kw: ask_claude_deep(ctx, **kw),
+            "ask_grok_deep": lambda **kw: ask_grok_deep(ctx, **kw),
+            "ask_claude_deep": lambda **kw: ask_grok_deep(ctx, **kw),
             "screen_look": lambda **kw: screen_look(ctx, **kw),
             "camera_look": lambda **kw: camera_look(ctx, **kw),
             "camera_watch": lambda **kw: camera_watch(ctx, **kw),
@@ -1658,16 +1681,35 @@ class ToolDispatcher:
         # para que asyncio.wait_for las cancele de verdad cuando expira.
         self._async_tools: dict[str, Callable[..., Any]] = {
             "ask_terra_code": lambda **kw: ask_terra_code_async(ctx, **kw),
-            "ask_claude_deep": lambda **kw: ask_claude_deep_async(ctx, **kw),
+            "ask_grok_deep": lambda **kw: ask_grok_deep_async(ctx, **kw),
+            "ask_claude_deep": lambda **kw: ask_grok_deep_async(ctx, **kw),
         }
 
     def is_async(self, name: str) -> bool:
         return name in self._async_tools
 
+    def _mode_name(self) -> str | None:
+        modes = getattr(self.ctx, "modes", None)
+        if modes is None:
+            return None
+        return getattr(modes, "mode", None)
+
     def call(self, name: str, args: dict) -> dict | ToolResult:
         fn = self._tools.get(name)
         if fn is None:
             return {"error": f"tool desconocida: {name}"}
+        mode = self._mode_name()
+        if mode is not None and not is_tool_allowed_for_mode(name, mode):
+            allowed = sorted(tools_for_mode(mode))
+            return {
+                "ok": False,
+                "error": (
+                    f"tool {name} no disponible en modo {mode}. "
+                    f"Cambia con jarvis_set_mode o usa una tool de este modo."
+                ),
+                "mode": mode,
+                "allowed_tools": allowed,
+            }
         try:
             return fn(**(args or {}))
         except TypeError as e:
@@ -1681,6 +1723,14 @@ class ToolDispatcher:
         fn = self._async_tools.get(name)
         if fn is None:
             return {"error": f"tool async desconocida: {name}"}
+        mode = self._mode_name()
+        if mode is not None and not is_tool_allowed_for_mode(name, mode):
+            return {
+                "ok": False,
+                "error": f"tool {name} no disponible en modo {mode}.",
+                "mode": mode,
+                "allowed_tools": sorted(tools_for_mode(mode)),
+            }
         try:
             return await fn(**(args or {}))
         except TypeError as e:

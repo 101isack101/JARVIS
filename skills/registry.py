@@ -133,12 +133,12 @@ BUILTIN_SKILLS = [
             "razonemos",
             "plan tecnico",
         ],
-        tools=["ask_terra_code", "ask_claude_deep", "jarvis_recall", "jarvis_run_safe_command"],
+        tools=["ask_terra_code", "ask_grok_deep", "jarvis_recall", "jarvis_run_safe_command"],
         risk="low",
         instructions=(
             "Usa recall antes de razonar sobre proyectos de Isaac. Para codigo, "
             "debugging, scripts, arquitectura de software o modo agentico, delega "
-            "explicitamente con ask_terra_code. Usa ask_claude_deep para analisis "
+            "explicitamente con ask_terra_code. Usa ask_grok_deep para analisis "
             "general no centrado en codigo o como fallback. Siempre avisa con una "
             "frase puente corta antes de delegar."
         ),
@@ -147,16 +147,16 @@ BUILTIN_SKILLS = [
 
 
 TOOL_HINTS_BY_SKILL = {
-    "agentics-aws": ["ask_terra_code", "ask_claude_deep", "jarvis_recall", "jarvis_run_safe_command"],
-    "faiss-rag": ["jarvis_recall", "jarvis_run_safe_command", "ask_terra_code", "ask_claude_deep"],
-    "n8n-specialist": ["ask_terra_code", "ask_claude_deep", "chrome_read_page", "jarvis_recall"],
-    "senior-data-analyst": ["ask_terra_code", "ask_claude_deep", "jarvis_run_safe_command", "jarvis_recall"],
-    "playwright-automation": ["ask_terra_code", "ask_claude_deep", "jarvis_run_safe_command", "screen_look"],
-    "spec-kit-flow": ["ask_terra_code", "ask_claude_deep", "jarvis_remember", "jarvis_recall"],
+    "agentics-aws": ["ask_terra_code", "ask_grok_deep", "jarvis_recall", "jarvis_run_safe_command"],
+    "faiss-rag": ["jarvis_recall", "jarvis_run_safe_command", "ask_terra_code", "ask_grok_deep"],
+    "n8n-specialist": ["ask_terra_code", "ask_grok_deep", "chrome_read_page", "jarvis_recall"],
+    "senior-data-analyst": ["ask_terra_code", "ask_grok_deep", "jarvis_run_safe_command", "jarvis_recall"],
+    "playwright-automation": ["ask_terra_code", "ask_grok_deep", "jarvis_run_safe_command", "screen_look"],
+    "spec-kit-flow": ["ask_terra_code", "ask_grok_deep", "jarvis_remember", "jarvis_recall"],
     "isaac-memory": ["jarvis_recall", "jarvis_session_recall", "jarvis_remember"],
-    "harness-router": ["jarvis_skill", "jarvis_security_status", "ask_terra_code", "ask_claude_deep"],
-    "pdf": ["ask_terra_code", "ask_claude_deep", "jarvis_run_safe_command"],
-    "doc": ["ask_terra_code", "ask_claude_deep", "jarvis_run_safe_command"],
+    "harness-router": ["jarvis_skill", "jarvis_security_status", "ask_terra_code", "ask_grok_deep"],
+    "pdf": ["ask_terra_code", "ask_grok_deep", "jarvis_run_safe_command"],
+    "doc": ["ask_terra_code", "ask_grok_deep", "jarvis_run_safe_command"],
 }
 
 
@@ -218,7 +218,7 @@ def _skill_from_markdown(path: Path) -> SkillDefinition | None:
         title=title,
         description=description,
         triggers=[description[:240]],
-        tools=TOOL_HINTS_BY_SKILL.get(name, ["ask_terra_code", "ask_claude_deep", "jarvis_recall"]),
+        tools=TOOL_HINTS_BY_SKILL.get(name, ["ask_terra_code", "ask_grok_deep", "jarvis_recall"]),
         instructions=instructions,
         risk="low",
         source_path=str(path),

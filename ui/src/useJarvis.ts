@@ -133,7 +133,7 @@ function applyCommand(set: UiDispatch, command: string, args: unknown[]) {
         return {
           ...prev,
           version: snap.version,
-          uiToken: snap.uiToken,
+          uiToken: snap.uiToken ?? prev.uiToken,
           state: snap.state,
           mode: snap.mode,
           connectionStatus: snap.connection.status,
@@ -257,7 +257,14 @@ export function useJarvis() {
 
   const connect = useCallback(() => {
     esRef.current?.close()
-    const es = new EventSource('/events')
+    const bootstrapToken = new URLSearchParams(window.location.search).get('access_token') || ''
+    if (bootstrapToken) {
+      setUi(prev => prev.uiToken ? prev : { ...prev, uiToken: bootstrapToken })
+    }
+    const eventsUrl = bootstrapToken
+      ? `/events?access_token=${encodeURIComponent(bootstrapToken)}`
+      : '/events'
+    const es = new EventSource(eventsUrl)
     esRef.current = es
 
     es.onopen = () => {
@@ -294,6 +301,7 @@ export function useJarvis() {
     async (command: string, token: string, args: Record<string, unknown> = {}) => {
       await fetch('/command', {
         method: 'POST',
+        credentials: 'include',
         headers: { 'Content-Type': 'application/json', 'X-Jarvis-Ui-Token': token },
         body: JSON.stringify({ command, args }),
       })
@@ -304,6 +312,7 @@ export function useJarvis() {
   const resolveApproval = useCallback(async (id: string, approved: boolean, token: string) => {
     await fetch('/approval', {
       method: 'POST',
+      credentials: 'include',
       headers: { 'Content-Type': 'application/json', 'X-Jarvis-Ui-Token': token },
       body: JSON.stringify({ id, approved }),
     })

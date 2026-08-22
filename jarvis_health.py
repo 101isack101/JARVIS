@@ -6,7 +6,7 @@ sesion Gemini Live (que es la fuente de costo). Fail-fast con mensaje claro
 si falta algo. Importable como modulo o ejecutable como script (`python jarvis_health.py`).
 
 Verificaciones (orden):
-  1. Variables de entorno minimas (GEMINI_API_KEY, ANTHROPIC_API_KEY, vault)
+  1. Variables de entorno minimas (GEMINI_API_KEY, XAI_API_KEY, vault)
      y warning opcional para OPENAI_API_KEY / GPT 5.5 agentico.
   2. Audio de entrada (microfono detectable via sounddevice).
   3. Audio de salida (parlante/altavoz default).
@@ -59,9 +59,13 @@ class HealthReport:
 def _check_env() -> Check:
     t0 = time.perf_counter()
     missing = []
-    for var in ("GEMINI_API_KEY", "ANTHROPIC_API_KEY", "JARVIS_OBSIDIAN_VAULT"):
+    from grok.reasoner import resolve_xai_api_key
+
+    for var in ("GEMINI_API_KEY", "JARVIS_OBSIDIAN_VAULT"):
         if not os.environ.get(var):
             missing.append(var)
+    if not resolve_xai_api_key():
+        missing.append("XAI_API_KEY")
     if missing:
         return Check(
             name="env",

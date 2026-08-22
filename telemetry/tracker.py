@@ -127,30 +127,32 @@ class TokenTracker:
         )
 
     def cost_by_provider(self) -> dict[str, float]:
-        """Suma costos agrupando por proveedor (gemini, claude)."""
+        """Suma costos agrupando por proveedor (gemini, grok)."""
         snap = self.snapshot()
-        result: dict[str, float] = {"gemini": 0.0, "claude": 0.0, "other": 0.0}
+        result: dict[str, float] = {"gemini": 0.0, "grok": 0.0, "claude": 0.0, "other": 0.0}
         for model, u in snap.by_model.items():
             if model.startswith("gemini"):
                 result["gemini"] += u.cost_usd
-            elif model.startswith("claude"):
-                result["claude"] += u.cost_usd
+            elif model.startswith("grok") or model.startswith("claude"):
+                result["grok"] += u.cost_usd
             else:
                 result["other"] += u.cost_usd
+        result["claude"] = result["grok"]
         return result
 
     def tokens_by_provider(self) -> dict[str, int]:
         """Suma de TODOS los tokens (in+out+cache) por proveedor."""
         snap = self.snapshot()
-        result: dict[str, int] = {"gemini": 0, "claude": 0, "other": 0}
+        result: dict[str, int] = {"gemini": 0, "grok": 0, "claude": 0, "other": 0}
         for model, u in snap.by_model.items():
             tot = u.input_tokens + u.output_tokens + u.cache_write_tokens + u.cache_read_tokens
             if model.startswith("gemini"):
                 result["gemini"] += tot
-            elif model.startswith("claude"):
-                result["claude"] += tot
+            elif model.startswith("grok") or model.startswith("claude"):
+                result["grok"] += tot
             else:
                 result["other"] += tot
+        result["claude"] = result["grok"]
         return result
 
     def add_listener(self, cb: Callable[[Snapshot], None]) -> None:

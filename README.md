@@ -1,10 +1,10 @@
 ﻿# JARVIS — Agente Conversacional en Tiempo Real
 
-Asistente estilo Gemini Live con voz bidireccional, visión de pantalla, computer use sobre Windows, GPT-5.6 Terra para codigo/modo agentico complejo y Claude 4.6 Sonnet como reasoner profundo general.
+Asistente estilo Gemini Live con voz bidireccional, visión de pantalla, computer use sobre Windows, GPT-5.6 Terra para codigo/modo agentico complejo y Grok 4.6 como reasoner profundo general.
 
 > **Status:** Copiloto local funcional. Voz bidireccional, overlay, hotkeys, memoria RAG, Claude tool, vision/screen capture, action executor seguro, modos, telemetry y budgets ya existen.
 
-> **Version actual:** v1.07 — GPT-5.6 Terra con tools diferidas, telemetría por misión y hardening del bridge web
+> **Version actual:** v1.09 — Grok 4.6 (diferido, idle-gated), auth del bridge sin token en `/state`, tools por modo
 
 ---
 
@@ -33,7 +33,7 @@ Esto arranca el shell Tauri que:
 
 - **Gemini Live** (`google-genai`): voz speech-to-speech nativo, barge-in, vision
 - **GPT-5.6 Terra** (`openai`, `reasoning.effort=high`): tool `ask_terra_code` para código, debugging, arquitectura y modo agentico complejo. Gemini mantiene la conversación: da una respuesta inicial y Terra mejora el resultado en segundo plano.
-- **Claude 4.6 Sonnet** (`anthropic`): tool `ask_claude_deep` para razonamiento profundo general y fallback
+- **Grok 4.6** (`openai` + `https://api.x.ai/v1`): tool `ask_grok_deep` para razonamiento profundo general y fallback
 - **Audio hibrido C++/Python**: AEC/resample de far-end puede usar `audio/native/bin/jarvis_audio_native.dll` y cae a Python si no esta compilado
 - **Vision hibrida C++/Python**: captura de camara puede usar `vision/native/bin/jarvis_vision_sidecar.exe` para liberar Python en modo vision continuo, con fallback OpenCV
 - **UI Tauri + React** (`jarvis-desktop.exe`): ventana nativa con React 19 + Tailwind v4 + framer-motion, SSE bridge headless
@@ -51,6 +51,10 @@ Esto arranca el shell Tauri que:
 ### 1. Instalar dependencias en Python global
 
 ```powershell
+# Recomendado: venv local
+powershell -ExecutionPolicy Bypass -File scripts\setup_venv.ps1
+
+# Alternativa: Python global de Isaac
 & "H:\Python311\python.exe" -m pip install -r requirements.txt
 ```
 
@@ -64,7 +68,7 @@ Copy-Item .env.example .env
 
 Edita `.env` y rellena:
 - **`GEMINI_API_KEY`** — obtener en [https://aistudio.google.com/app/apikey](https://aistudio.google.com/app/apikey)
-- **`ANTHROPIC_API_KEY`** — ya tienes una en `Interview_Copilot\.env`, copiala
+- **`XAI_API_KEY`** — https://console.x.ai (Grok 4.6)
 - **`OPENAI_API_KEY`** — habilita `ask_terra_code`
 - **`JARVIS_TERRA_MODEL`** — default `gpt-5.6-terra`
 - **`JARVIS_TERRA_REASONING_EFFORT`** — default `high`; ajusta el esfuerzo de razonamiento de Terra.
@@ -86,7 +90,7 @@ Ejecutar los dos spikes en orden. Ambos deberían terminar en <30s.
 ### Spike 1: Claude reasoner (más rápido, sin audio)
 
 ```powershell
-& "H:\Python311\python.exe" scripts\spike_claude_reasoner.py
+& "H:\Python311\python.exe" grok\reasoner.py
 ```
 
 **Éxito esperado:**
@@ -341,7 +345,8 @@ Jarvis/
 ├── overlay/                    # tkinter UI + web UI opcional
 ├── audio/                      # capture, playback, VAD
 ├── gemini/                     # GeminiLiveSession + tools + system prompt
-├── claude/                     # ask_claude_deep wrapper
+├── grok/                       # ask_grok_deep wrapper (Grok 4.6)
+├── claude/                     # alias de compatibilidad hacia grok/
 ├── actions/                    # Computer use read-only estructurado
 ├── agent_runtime/              # Misiones durables, policy, planner y verifier
 ├── vision/                     # screen capture

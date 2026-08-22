@@ -133,6 +133,22 @@ def test_receive_loop_reconnects_cleanly_on_go_away():
     asyncio.run(run())
 
 
+def test_turn_complete_reconnects_when_tools_refresh_requested():
+    async def run():
+        logs = []
+        session = JarvisSession(
+            SessionConfig(api_key="test-key"),
+            SessionCallbacks(on_log=logs.append),
+        )
+        session._tools_refresh_requested = True
+        action = await session._handle_response(_turn_complete_response(), 1)
+        assert action == "reconnect"
+        assert session._tools_refresh_requested is False
+        assert any("actualizar tools" in line for line in logs)
+
+    asyncio.run(run())
+
+
 def test_submit_closes_coroutine_when_loop_not_ready():
     session = JarvisSession(
         SessionConfig(api_key="test-key"),

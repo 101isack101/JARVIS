@@ -56,6 +56,18 @@ def test_planner_blocks_double_invalid_output():
         )
 
 
+def test_planner_fallback_without_reasoner():
+    plan = MissionPlanner(None).plan(
+        goal="Evaluar el estado técnico de JARVIS",
+        max_steps=4,
+        deadline_seconds=120,
+    )
+    assert plan.goal == "Evaluar el estado técnico de JARVIS"
+    assert 1 <= len(plan.steps) <= 4
+    assert plan.steps[0].operation == "list_dir"
+    assert MissionPlanner(None).model == "template-l1"
+
+
 def test_json_extractor_rejects_prose_or_multiple_objects():
     with pytest.raises(PlannerError):
         extract_single_json_object("here: {}")

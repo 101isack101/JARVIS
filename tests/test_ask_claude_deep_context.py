@@ -16,7 +16,7 @@ class FakeRAG:
 
 
 class CapturingReasoner:
-    model = "claude-sonnet-4-6"
+    model = "claude-sonnet-5"
 
     def __init__(self):
         self.captured = None

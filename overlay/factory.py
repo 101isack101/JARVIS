@@ -24,7 +24,7 @@ def create_overlay(
     a jarvis.py. La overlay Tkinter clasica lo ignora.
     """
 
-    ui = os.environ.get("JARVIS_UI", os.environ.get("JARVIS_OVERLAY", "tk")).strip().lower()
+    ui = os.environ.get("JARVIS_UI", os.environ.get("JARVIS_OVERLAY", "web")).strip().lower()
     if ui in {"web", "browser", "premium"}:
         try:
             from overlay.web_overlay import WebJarvisOverlay

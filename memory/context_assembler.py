@@ -1,7 +1,7 @@
 """Ensamblado de contexto de proyecto para el reasoner (Fase 2).
 
 Reúne Project Memory Card + resumen de sesión previa + memorias RAG y los
-entrega como un bloque de texto que ask_claude_deep concatena al context_extra.
+entrega como un bloque de texto que ask_grok_deep concatena al context_extra.
 
 Determinista y fail-safe: corre antes de cada llamada al reasoner, así que
 debe ser barato y nunca propagar excepciones que rompan el razonamiento.
@@ -113,7 +113,7 @@ def build_project_context(
         rag_results = searcher.search(prompt, top_k=RAG_TOP_K)
         if curator is not None:
             rag_results = curator.rerank(rag_results)
-            # El pending que deja aqui SOLO lo resuelve ask_claude_deep via
+            # El pending que deja aqui SOLO lo resuelve ask_grok_deep via
             # attribute_usage; otros call sites lo dejarian sin atribuir hasta que el
             # housekeeping de cierre lo purgue. Hoy el unico llamador es el path profundo.
             curator.note_retrieval(prompt, rag_results)

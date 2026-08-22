@@ -29,6 +29,18 @@ def test_safe_action_executor_blocks_destructive(tmp_path):
     assert result["executed"] is False
 
 
+def test_safe_action_executor_blocks_powershell_aliases(tmp_path):
+    broker = AutoApprovalBroker(approve=False)
+    ex = SafeActionExecutor(root=tmp_path, mode="prod", approval_broker=broker)
+
+    ri = ex.run_powershell("ri secret.txt", cwd=str(tmp_path))
+    sc = ex.run_powershell("sc file.txt 'hola'", cwd=str(tmp_path))
+
+    assert ri["allowed"] is False
+    assert sc["allowed"] is False
+    assert ri.get("error") or ri["executed"] is False
+
+
 def test_safe_action_executor_hard_blocks_sendkeys_without_hitl(tmp_path):
     broker = AutoApprovalBroker(approve=True)
     ex = SafeActionExecutor(root=tmp_path, mode="prod", approval_broker=broker)

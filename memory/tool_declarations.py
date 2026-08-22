@@ -10,6 +10,8 @@ from __future__ import annotations
 
 from google.genai import types
 
+from .tool_sets import tools_for_mode
+
 
 # =====================================================================
 # DECLARACIONES PARA GEMINI (function_declarations)
@@ -48,7 +50,7 @@ JARVIS_SESSION_RECALL_DECL = types.FunctionDeclaration(
         "Isaac diga 'ayer', 'anoche', 'la sesion pasada', 'la vez anterior', "
         "'la conversacion que tuvimos', 'que hablamos' o cualquier referencia "
         "temporal a conversaciones previas. Es mas directa que jarvis_recall "
-        "para continuidad entre sesiones y no llama a Claude."
+        "para continuidad entre sesiones y no llama a Grok."
     ),
     parameters=types.Schema(
         type=types.Type.OBJECT,
@@ -170,10 +172,10 @@ JARVIS_LINK_DECL = types.FunctionDeclaration(
     ),
 )
 
-ASK_CLAUDE_DEEP_DECL = types.FunctionDeclaration(
-    name="ask_claude_deep",
+ASK_GROK_DEEP_DECL = types.FunctionDeclaration(
+    name="ask_grok_deep",
     description=(
-        "Delegar a Claude cuando la tarea necesita razonamiento profundo general, "
+        "Delegar a Grok 4.6 cuando la tarea necesita razonamiento profundo general, "
         "analisis largo o planning no centrado en codigo. Para codigo, debugging "
         "de software, arquitectura tecnica o modo agentico usa primero "
         "ask_terra_code. NO usar para preguntas simples o charla; Jarvis debe "
@@ -184,7 +186,7 @@ ASK_CLAUDE_DEEP_DECL = types.FunctionDeclaration(
         properties={
             "prompt": types.Schema(
                 type=types.Type.STRING,
-                description="Pregunta/tarea concreta para Claude.",
+                description="Pregunta/tarea concreta para Grok 4.6.",
             ),
             "context_extra": types.Schema(
                 type=types.Type.STRING,
@@ -206,7 +208,7 @@ ASK_TERRA_CODE_DECL = types.FunctionDeclaration(
         "entrar en modo agentico, disenar una implementacion, depurar un bug de "
         "software, crear scripts, refactorizar o planear cambios tecnicos. "
         "Jarvis da primero una respuesta inicial breve y envia una mejora cuando "
-        "Terra termina. Usar antes que ask_claude_deep para trabajo de codigo/agentico."
+        "Terra termina. Usar antes que ask_grok_deep para trabajo de codigo/agentico."
     ),
     parameters=types.Schema(
         type=types.Type.OBJECT,
@@ -937,8 +939,8 @@ JARVIS_TASK_DECL = types.FunctionDeclaration(
 )
 
 
-def all_function_declarations() -> list[types.FunctionDeclaration]:
-    return [
+def all_function_declarations(mode: str | None = None) -> list[types.FunctionDeclaration]:
+    decls = [
         JARVIS_RECALL_DECL,
         JARVIS_SESSION_RECALL_DECL,
         JARVIS_CURRENT_SESSION_RECALL_DECL,
@@ -946,7 +948,7 @@ def all_function_declarations() -> list[types.FunctionDeclaration]:
         JARVIS_BROWSE_DECL,
         JARVIS_LINK_DECL,
         ASK_TERRA_CODE_DECL,
-        ASK_CLAUDE_DEEP_DECL,
+        ASK_GROK_DEEP_DECL,
         SCREEN_LOOK_DECL,
         CAMERA_LOOK_DECL,
         CAMERA_WATCH_DECL,
@@ -971,8 +973,16 @@ def all_function_declarations() -> list[types.FunctionDeclaration]:
         JARVIS_PROACTIVE_CHECK_DECL,
         JARVIS_TASK_DECL,
     ]
+    if mode is None:
+        return decls
+    allowed = tools_for_mode(mode)
+    return [decl for decl in decls if decl.name in allowed]
 
 
-def make_tool_object() -> types.Tool:
-    """Wrap function declarations en un objeto types.Tool listo para LiveConnectConfig."""
-    return types.Tool(function_declarations=all_function_declarations())
+def make_tool_object(mode: str | None = None) -> types.Tool:
+    """Wrap function declarations en un objeto types.Tool listo para LiveConnectConfig.
+
+    Si `mode` es None se expone el catalogo completo (tests / dispatcher).
+    En Live, pasar el modo activo para no ofrecer computer-use en general.
+    """
+    return types.Tool(function_declarations=all_function_declarations(mode))

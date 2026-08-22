@@ -24,8 +24,12 @@ READ_ONLY_PREFIXES = (
     "get-location",
     "dir",
     "ls",
+    "gci",
     "get-childitem",
     "get-content",
+    "gc ",
+    "cat ",
+    "type ",
     "select-string",
     "rg ",
     "git status",
@@ -81,12 +85,19 @@ RISKY_TOKENS = (
     "rm ",
     "del ",
     "erase ",
+    "rd ",
+    "rmdir",
+    "ri ",
     "move-item",
     "mv ",
+    "mi ",
     "copy-item",
     "cp ",
+    "cpi ",
     "set-content",
+    "sc ",
     "add-content",
+    "ac ",
     "out-file",
     "git push",
     "git commit",
@@ -231,7 +242,8 @@ class SafeActionExecutor:
 
     def _risk_for(self, command: str) -> str:
         normalized = self._normalize_command(command)
-        if any(tok in normalized for tok in ("remove-item", "rm ", "del ", "erase ")):
+        first = normalized.split(" ", 1)[0] if normalized else ""
+        if any(tok in normalized for tok in ("remove-item", "rm ", "del ", "erase ", "rd ", "rmdir")) or first in {"ri", "rm", "del", "erase", "rd", "rmdir"}:
             return "destructive"
         if "git push" in normalized:
             return "git_publish"
@@ -405,6 +417,11 @@ class SafeActionExecutor:
             return {"ok": False, "allowed": True, "operation": op, "error": f"{type(exc).__name__}: {exc}"}
 
     def run_powershell(self, command: str, cwd: str | None = None) -> dict:
+        """DEPRECATED: no exponer a Gemini. Preferir run_structured.
+
+        Se conserva para tests y callers internos. Los alias de PowerShell
+        (ri/sc/gc/mi) se clasifican en RISKY_TOKENS / READ_ONLY_PREFIXES.
+        """
         workdir = (Path(cwd) if cwd else self.root).resolve()
         if not self._inside_root(workdir):
             return ActionResult(

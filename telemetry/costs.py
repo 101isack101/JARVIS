@@ -1,16 +1,16 @@
 """
 telemetry/costs.py - Tabla de precios de modelos.
 
-Precios en USD por 1M tokens. Editable en caliente — cuando Anthropic/Google
+Precios en USD por 1M tokens. Editable en caliente — cuando xAI/Google
 ajusten precios, actualizo esta tabla sin tocar la logica del tracker.
 
-DECISION DE MODELO (Isaac, 2026-05-15):
-- Reasoner canonico de Jarvis: `claude-sonnet-4-6`. NO migrar a 4.7.
-  Esta eleccion balancea calidad/costo/latencia para sesiones largas con voz.
-  Otros proyectos pueden usar otro modelo; aqui mantener 4.6.
+DECISION DE MODELO (Isaac, 2026-08-19):
+- Reasoner canonico de Jarvis: `grok-4.6` via API xAI.
+- Las entradas viejas de Claude se QUEDAN: la telemetria historica guarda el
+  model_id y sin tarifa el costo pasado se reportaria como 0.
 
-Snapshot 2026-05-15. Si la API cambia precios, regenerar comparando con:
-- Anthropic: https://www.anthropic.com/pricing
+Snapshot 2026-08-19. Si la API cambia precios, regenerar comparando con:
+- xAI: https://docs.x.ai/docs/models
 - Google AI: https://ai.google.dev/pricing
 """
 
@@ -19,10 +19,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 # Fecha del ultimo snapshot manual de precios. Usar para detectar tablas stale.
-PRICING_LAST_UPDATED = "2026-07-22"
+PRICING_LAST_UPDATED = "2026-08-19"
 
 # Modelo canonico de razonamiento profundo en Jarvis. Cambios deliberados solo.
-JARVIS_REASONER_MODEL = "claude-sonnet-4-6"
+JARVIS_REASONER_MODEL = "grok-4.6"
 
 
 @dataclass(frozen=True)
@@ -37,18 +37,35 @@ class ModelPricing:
 
 # Tabla maestra. Key = model_id (string usado en API calls).
 PRICING: dict[str, ModelPricing] = {
-    # === Claude (Anthropic) ===
+    # === Grok (xAI) ===
+    # <200k prompt: $2 input / $0.50 cached / $6 output. cache_write ≈ input.
+    "grok-4.6": ModelPricing(
+        input=2.00,
+        output=6.00,
+        cache_write=2.00,
+        cache_read=0.50,
+    ),
+    # === Claude (historico, Anthropic) ===
+    "claude-sonnet-5": ModelPricing(
+        input=2.00,
+        output=10.00,
+        cache_write=2.50,
+        cache_read=0.20,
+    ),
+    # Modelo anterior — se conserva para no perder el costo de la telemetria vieja.
     "claude-sonnet-4-6": ModelPricing(
         input=3.00,
         output=15.00,
         cache_write=3.75,
         cache_read=0.30,
     ),
+    # Referencia de comparacion. OJO: estaba mal (decia 15/75, tarifa de Opus 3);
+    # el precio real de la familia Opus 4.7+ es 5/25.
     "claude-opus-4-7": ModelPricing(
-        input=15.00,
-        output=75.00,
-        cache_write=18.75,
-        cache_read=1.50,
+        input=5.00,
+        output=25.00,
+        cache_write=6.25,
+        cache_read=0.50,
     ),
     "claude-haiku-4-5": ModelPricing(
         input=1.00,

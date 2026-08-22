@@ -57,7 +57,7 @@ class TelemetryFooter(tk.Frame):
         self.gemini_widgets = self._build_provider_block("Gemini")
         self.gemini_widgets["frame"].pack(side="left", padx=(PAD_X, 16))
 
-        self.claude_widgets = self._build_provider_block("Claude")
+        self.claude_widgets = self._build_provider_block("Grok")
         self.claude_widgets["frame"].pack(side="left", padx=(0, 16))
 
         self.total_label = tk.Label(

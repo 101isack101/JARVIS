@@ -90,7 +90,7 @@ def test_bridge_post_authorization_requires_session_token():
 
 
 def test_bridge_rejects_non_loopback_host_header():
-    """DNS rebinding: /state entrega el uiToken, asi que el Host es la barrera."""
+    """DNS rebinding: Host sigue siendo barrera aunque el token ya no va en /state."""
     handler = object.__new__(_BridgeHandler)
     handler.server = SimpleNamespace(server_address=("127.0.0.1", 8765))
 

@@ -3,7 +3,7 @@
 Verifica que WebJarvisOverlay:
 - No importa ni instancia tkinter en su codigo de produccion
 - Expone overlay.after() via UiScheduler
-- Sirve /state con uiToken
+- Sirve /state autenticado SIN uiToken
 - Se cierra limpiamente
 
 Todos estos tests deben FALLAR hasta completar la refactorizacion de web_overlay.py.
@@ -15,6 +15,7 @@ import inspect
 import json
 import threading
 import time
+import urllib.error
 import urllib.request
 from unittest.mock import MagicMock, patch
 
@@ -79,15 +80,38 @@ def test_no_root_attribute():
         overlay.close()
 
 
-def test_state_endpoint_returns_ui_token():
-    """GET /state devuelve JSON con uiToken del overlay."""
+def test_bootstrap_url_serves_html_with_session_cookie():
+    """Tauri carga /?access_token=...; debe devolver el HUD y Set-Cookie."""
+    overlay = _make_overlay()
+    try:
+        req = urllib.request.Request(overlay.bootstrap_url)
+        with urllib.request.urlopen(req, timeout=3) as resp:
+            body = resp.read()
+            cookie = resp.headers.get("Set-Cookie", "")
+            status = resp.status
+        assert status == 200
+        assert b"<html" in body.lower() or b"<!doctype" in body.lower()
+        assert "jarvis_ui=" in cookie
+        assert overlay.ui_token in cookie
+    finally:
+        overlay.close()
+
+
+def test_state_endpoint_requires_token_and_omits_ui_token():
+    """GET /state exige token y no lo expone en el JSON."""
     overlay = _make_overlay()
     try:
         url = overlay.url.rstrip("/") + "/state"
-        with urllib.request.urlopen(url, timeout=3) as resp:
+        try:
+            urllib.request.urlopen(url, timeout=3)
+            raise AssertionError("/state sin token deberia fallar")
+        except urllib.error.HTTPError as exc:
+            assert exc.code == 403
+        req = urllib.request.Request(url, headers={"X-Jarvis-Ui-Token": overlay.ui_token})
+        with urllib.request.urlopen(req, timeout=3) as resp:
             data = json.loads(resp.read())
-        assert "uiToken" in data, f"uiToken no en /state: {data.keys()}"
-        assert data["uiToken"] == overlay.ui_token
+        assert "uiToken" not in data
+        assert "version" in data
     finally:
         overlay.close()
 

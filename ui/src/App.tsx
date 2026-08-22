@@ -373,7 +373,7 @@ function MissionControl({
                 <section className="mission-section mission-telemetry-section">
                   <header><span>Telemetría de misión</span><small>{telemetry?.scope === 'mission_window_delta' ? 'ventana de misión / sesión' : 'duración persistida'}</small></header>
                   <div className="mission-provider-grid">
-                    {['gemini', 'claude', 'other'].map(provider => {
+                    {['gemini', 'grok', 'other'].map(provider => {
                       const metric = telemetry?.providers?.[provider]
                       return <div key={provider}><span>{provider}</span><strong>{metric ? money(metric.cost_usd, 5) : '—'}</strong><small>{metric ? `${metric.tokens.toLocaleString()} tokens` : 'sin delta'}</small></div>
                     })}
@@ -415,7 +415,7 @@ function TelemetryPanel({ telemetry, budget }: {
   budget: BudgetPayload | null
 }) {
   const geminiTokens = telemetry?.gemini.tokensLabel ?? budget?.gemini.tokensLabel ?? '0'
-  const claudeTokens = telemetry?.claude.tokensLabel ?? budget?.claude.tokensLabel ?? '0'
+  const grokTokens = telemetry?.grok?.tokensLabel ?? telemetry?.claude.tokensLabel ?? budget?.grok?.tokensLabel ?? budget?.claude.tokensLabel ?? '0'
   const totalUsd = telemetry?.totalUsd ?? budget?.totalUsd ?? 0
   const totalTokens = telemetry?.totalTokensLabel ?? '0'
   const camera = telemetry?.camera
@@ -447,10 +447,10 @@ function TelemetryPanel({ telemetry, budget }: {
           <em>{rate(telemetry?.gemini.usdPerMin ?? 0, 5)}</em>
         </div>
         <div className="hud-telemetry-row">
-          <span>Claude</span>
-          <strong>{claudeTokens}</strong>
-          <b>{money(telemetry?.claude.costUsd ?? budget?.claude.spentUsd ?? 0, 5)}</b>
-          <em>{rate(telemetry?.claude.usdPerMin ?? 0, 5)}</em>
+          <span>Grok</span>
+          <strong>{grokTokens}</strong>
+          <b>{money(telemetry?.grok?.costUsd ?? telemetry?.claude.costUsd ?? budget?.grok?.spentUsd ?? budget?.claude.spentUsd ?? 0, 5)}</b>
+          <em>{rate(telemetry?.grok?.usdPerMin ?? telemetry?.claude.usdPerMin ?? 0, 5)}</em>
         </div>
       </div>
 

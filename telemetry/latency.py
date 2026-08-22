@@ -34,6 +34,12 @@ def _now_ms() -> float:
     return time.perf_counter() * 1000.0
 
 
+# TTFB above this without a slow tool is attributed to the live model.
+_MODEL_SLOW_MS = 2500.0
+# A tool that ran this long likely owned the silence.
+_BLOCKING_TOOL_MS = 2000.0
+
+
 @dataclass
 class TurnLatency:
     t_user_end_ms: float | None = None
@@ -41,6 +47,8 @@ class TurnLatency:
     t_turn_complete_ms: float | None = None
     tools: list[tuple[str, float]] = field(default_factory=list)
     interrupted: bool = False
+    watchdog_fired: bool = False
+    deferred_pending: int = 0
 
     @property
     def ttfb_ms(self) -> float | None:
@@ -58,6 +66,21 @@ class TurnLatency:
     def tools_total_ms(self) -> float:
         return sum(elapsed for _, elapsed in self.tools)
 
+    @property
+    def slow_reason(self) -> str:
+        """Cause of perceived delay for this turn. Never guessed from other turns."""
+        blocking = [elapsed for _, elapsed in self.tools if elapsed >= _BLOCKING_TOOL_MS]
+        if blocking:
+            return "blocking_tool"
+        if self.watchdog_fired and self.t_first_audio_ms is None:
+            return "watchdog"
+        ttfb = self.ttfb_ms
+        if ttfb is None:
+            return "incomplete"
+        if ttfb >= _MODEL_SLOW_MS:
+            return "model"
+        return "ok"
+
 
 class LatencyTracker:
     """Ventana rodante de turnos con percentiles thread-safe."""
@@ -66,6 +89,7 @@ class LatencyTracker:
         self._lock = threading.Lock()
         self._turns: deque[TurnLatency] = deque(maxlen=window)
         self._current: TurnLatency | None = None
+        self._watchdog_count = 0
 
     # ---- Marcadores publicos (thread-safe) ----
 
@@ -85,7 +109,7 @@ class LatencyTracker:
                 return  # ya marcado este turno
             self._current.t_first_audio_ms = _now_ms()
 
-    def mark_turn_complete(self) -> TurnLatency | None:
+    def mark_turn_complete(self, *, deferred_pending: int = 0) -> TurnLatency | None:
         """Server emitio turn_complete. Cierra el turno y lo agrega a la ventana.
 
         Devuelve el TurnLatency cerrado (o None si no habia turno activo)
@@ -95,6 +119,7 @@ class LatencyTracker:
             if self._current is None:
                 return None
             self._current.t_turn_complete_ms = _now_ms()
+            self._current.deferred_pending = max(0, int(deferred_pending))
             turn = self._current
             self._turns.append(turn)
             self._current = None
@@ -121,6 +146,13 @@ class LatencyTracker:
                 return
             self._current.tools.append((name, float(elapsed_ms)))
 
+    def record_watchdog(self) -> None:
+        """UI watchdog fired while waiting for first audio or a tool."""
+        with self._lock:
+            self._watchdog_count += 1
+            if self._current is not None:
+                self._current.watchdog_fired = True
+
     # ---- Consultas ----
 
     def percentiles(self) -> dict[str, float | int]:
@@ -142,6 +174,22 @@ class LatencyTracker:
             "max_ms": ttfbs_sorted[-1],
         }
 
+    def snapshot(self) -> dict[str, float | int | str | None]:
+        """Resumen para /state: percentiles + causa del ultimo turno."""
+        p = self.percentiles()
+        with self._lock:
+            last = self._turns[-1] if self._turns else None
+            watchdog_n = self._watchdog_count
+        last_reason = last.slow_reason if last is not None else None
+        last_ttfb = last.ttfb_ms if last is not None else None
+        return {
+            **p,
+            "last_slow_reason": last_reason,
+            "last_ttfb_ms": round(last_ttfb, 1) if last_ttfb is not None else None,
+            "watchdog_n": watchdog_n,
+            "deferred_pending": last.deferred_pending if last is not None else 0,
+        }
+
     def summary_line(self) -> str:
         """Una linea condensada para log de cierre de sesion."""
         p = self.percentiles()
@@ -157,13 +205,22 @@ class LatencyTracker:
     def format_turn(turn: TurnLatency) -> str:
         """Formato compacto de un turno individual para log por linea."""
         if turn.ttfb_ms is None:
-            return f"[LATENCY] turn incompleto (interrupted={turn.interrupted})"
+            extra = f" reason={turn.slow_reason}" if turn.slow_reason != "incomplete" else ""
+            return (
+                f"[LATENCY] turn incompleto (interrupted={turn.interrupted}"
+                f"{' watchdog' if turn.watchdog_fired else ''}{extra})"
+            )
         parts = [f"TTFB={turn.ttfb_ms:.0f}ms"]
         if turn.speech_dur_ms is not None:
             parts.append(f"speech={turn.speech_dur_ms:.0f}ms")
         if turn.tools:
             tools_str = ",".join(f"{n}:{e:.0f}" for n, e in turn.tools)
             parts.append(f"tools=[{tools_str}]")
+        parts.append(f"reason={turn.slow_reason}")
+        if turn.deferred_pending:
+            parts.append(f"deferred={turn.deferred_pending}")
+        if turn.watchdog_fired:
+            parts.append("watchdog")
         if turn.interrupted:
             parts.append("interrupted")
         return "[LATENCY] " + " ".join(parts)

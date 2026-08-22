@@ -104,5 +104,5 @@ Usar validators paralelos, DynamoDB e idempotencia.
 
     assert result["ok"] is True
     assert result["skill"]["source_path"].endswith("SKILL.md")
-    assert "ask_claude_deep" in result["skill"]["tools"]
+    assert "ask_grok_deep" in result["skill"]["tools"]
     assert "validators paralelos" in result["skill"]["instructions"]

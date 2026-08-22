@@ -12,8 +12,10 @@ y `/command`.
 
 ## Usar en Jarvis
 
-Por defecto `jarvis.py` usa el overlay Tkinter clasico. La UI web queda como
-opcion visual experimental y debe activarse explicitamente.
+Legacy HTML/JS. En produccion `WebJarvisOverlay` sirve `overlay/web_dist`
+(build React de `ui/`). Esta carpeta es fallback si `web_dist/index.html` no existe.
+
+Por defecto `jarvis.py` usa `JARVIS_UI=web`. Tkinter: `JARVIS_UI=tk`.
 
 ```powershell
 & "H:\Python311\python.exe" jarvis.py

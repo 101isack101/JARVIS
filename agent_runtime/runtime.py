@@ -147,8 +147,6 @@ class AgentRuntimeService:
     ) -> dict[str, Any]:
         if not self.config.enabled:
             return {"ok": False, "error_code": "AGENT_RUNTIME_DISABLED", "error": "runtime deshabilitado"}
-        if self.planner.reasoner is None or not getattr(self.planner.reasoner, "configured", True):
-            return {"ok": False, "error_code": "PLANNER_UNAVAILABLE", "error": "planner no configurado"}
         try:
             mission = make_mission(
                 goal=goal,

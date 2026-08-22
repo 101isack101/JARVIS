@@ -41,7 +41,7 @@ class BudgetStatus(Enum):
 
 @dataclass
 class ProviderBudget:
-    provider: str               # 'gemini' | 'claude'
+    provider: str               # 'gemini' | 'grok'
     limit_usd: float
     spent_usd: float
     status: BudgetStatus
@@ -83,11 +83,14 @@ class BudgetGate:
             if gemini_limit_usd is not None
             else float(os.environ.get("JARVIS_BUDGET_GEMINI_USD", "2.00"))
         )
-        self.claude_limit = (
-            claude_limit_usd
-            if claude_limit_usd is not None
-            else float(os.environ.get("JARVIS_BUDGET_CLAUDE_USD", "1.00"))
-        )
+        if claude_limit_usd is not None:
+            self.claude_limit = claude_limit_usd
+        else:
+            self.claude_limit = float(
+                os.environ.get("JARVIS_BUDGET_GROK_USD")
+                or os.environ.get("JARVIS_BUDGET_CLAUDE_USD", "1.00")
+            )
+        self.grok_limit = self.claude_limit
         self.period = period or os.environ.get("JARVIS_BUDGET_PERIOD", "session")
         if hard_stop is not None:
             self.hard_stop = hard_stop
@@ -106,7 +109,11 @@ class BudgetGate:
                 costs[provider] = costs.get(provider, 0.0) + spent
         return BudgetReport(
             gemini=self._provider_budget("gemini", costs["gemini"], self.gemini_limit),
-            claude=self._provider_budget("claude", costs["claude"], self.claude_limit),
+            claude=self._provider_budget(
+                "grok",
+                costs.get("grok", costs.get("claude", 0.0)),
+                self.claude_limit,
+            ),
             period=self.period,
             hard_stop=self.hard_stop,
         )
@@ -128,7 +135,7 @@ class BudgetGate:
         report = self.evaluate(tracker)
         if provider == "gemini":
             return not report.gemini.blocked
-        if provider == "claude":
+        if provider in {"claude", "grok"}:
             return not report.claude.blocked
         return True
 

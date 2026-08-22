@@ -22,7 +22,7 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Callable
-from urllib.parse import unquote, urlparse, urlsplit
+from urllib.parse import parse_qs, unquote, urlparse, urlsplit
 
 from jarvis_version import JARVIS_VERSION_LABEL
 from overlay.scheduler import UiScheduler
@@ -68,6 +68,7 @@ _WEB_FALLBACK = Path(__file__).resolve().parent / "web_ui"
 _ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8765
+COOKIE_NAME = "jarvis_ui"
 REFRESH_MS = 500
 DEFAULT_AUDIO_VISUAL_FPS = 30
 USAGE_RATE_WINDOW_S = 30.0
@@ -172,6 +173,24 @@ class _BridgeHandler(BaseHTTPRequestHandler):
             self.send_error(HTTPStatus.FORBIDDEN, "bad host")
             return
         parsed = urlparse(self.path)
+        query_token = ""
+        if parsed.query:
+            query_token = (parse_qs(parsed.query).get("access_token") or [""])[0]
+        if parsed.path in {"", "/"} and query_token:
+            if not self._token_matches(query_token):
+                self.send_error(HTTPStatus.FORBIDDEN, "bad token")
+                return
+            # Servir el HTML en la misma request (Set-Cookie). Un 302 deja a
+            # WebView2 de Tauri sin cookie y /events responde 403: UI muda.
+            self._serve_static("/", set_cookie=True)
+            return
+        if parsed.path == "/health":
+            self._send_json({"ok": True, "version": JARVIS_VERSION_LABEL})
+            return
+        if parsed.path in {"/state", "/events"}:
+            if not self._authorized({"uiToken": query_token} if query_token else {}):
+                self._send_json({"ok": False, "error": "forbidden"}, HTTPStatus.FORBIDDEN)
+                return
         if parsed.path == "/state":
             self._send_json(self.server.overlay.snapshot())
             return
@@ -183,6 +202,9 @@ class _BridgeHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:  # noqa: N802 - stdlib handler API
         if not self._host_allowed():
             self.send_error(HTTPStatus.FORBIDDEN, "bad host")
+            return
+        if not self._origin_allowed():
+            self.send_error(HTTPStatus.FORBIDDEN, "bad origin")
             return
         parsed = urlparse(self.path)
         body = self._read_json()
@@ -223,9 +245,54 @@ class _BridgeHandler(BaseHTTPRequestHandler):
             return {}
         return value if isinstance(value, dict) else {}
 
+    def _token_from_cookie(self) -> str:
+        raw = self.headers.get("Cookie") or ""
+        for part in raw.split(";"):
+            name, _, value = part.strip().partition("=")
+            if name == COOKIE_NAME:
+                return value
+        return ""
+
+    def _token_matches(self, token: str) -> bool:
+        expected = self.server.overlay.ui_token
+        if not token or not expected:
+            return False
+        try:
+            return secrets.compare_digest(token, expected)
+        except (TypeError, ValueError):
+            return False
+
     def _authorized(self, body: dict[str, Any]) -> bool:
-        token = self.headers.get("X-Jarvis-Ui-Token", "") or str(body.get("uiToken", ""))
-        return secrets.compare_digest(token, self.server.overlay.ui_token)
+        token = (
+            self.headers.get("X-Jarvis-Ui-Token", "")
+            or str(body.get("uiToken", "") or "")
+            or self._token_from_cookie()
+        )
+        return self._token_matches(token)
+
+    def _origin_allowed(self) -> bool:
+        origin = (self.headers.get("Origin") or "").strip()
+        if not origin:
+            return True
+        try:
+            hostname = urlsplit(origin).hostname
+        except ValueError:
+            return False
+        if not hostname:
+            return False
+        bound = str(self.server.server_address[0]).lower()
+        return hostname.lower() in (LOOPBACK_HOSTNAMES | {bound})
+
+    def _redirect_with_cookie(self) -> None:
+        token = self.server.overlay.ui_token
+        self.send_response(int(HTTPStatus.FOUND))
+        self.send_header("Location", "/")
+        self.send_header(
+            "Set-Cookie",
+            f"{COOKIE_NAME}={token}; Path=/; HttpOnly; SameSite=Strict; Max-Age=86400",
+        )
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
 
     def _send_json(self, payload: dict[str, Any], status: HTTPStatus = HTTPStatus.OK) -> None:
         data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
@@ -236,7 +303,7 @@ class _BridgeHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
-    def _serve_static(self, path: str) -> None:
+    def _serve_static(self, path: str, set_cookie: bool = False) -> None:
         rel = "index.html" if path in {"", "/"} else unquote(path.lstrip("/"))
         web_dir = resolve_web_dir()
         target = (web_dir / rel).resolve()
@@ -254,6 +321,12 @@ class _BridgeHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(data)))
         self.send_header("Cache-Control", "no-cache")
+        if set_cookie:
+            token = self.server.overlay.ui_token
+            self.send_header(
+                "Set-Cookie",
+                f"{COOKIE_NAME}={token}; Path=/; HttpOnly; SameSite=Strict; Max-Age=86400",
+            )
         self.end_headers()
         self.wfile.write(data)
 
@@ -320,12 +393,13 @@ class WebJarvisOverlay:
         self._mission_detail: dict[str, Any] | None = None
         self._audio_telemetry: dict[str, Any] = {}
         self._latency_lines: list[str] = []
+        self._latency_summary: dict[str, Any] = {}
         self._camera_active = False
         self._camera_frame_b64: str | None = None
         self._camera_focus: dict[str, Any] | None = None
         self._memory_active: dict[str, dict[str, Any]] = {}
         self._pending_approvals: dict[str, Callable[[str, bool], None]] = {}
-        self.ui_token = secrets.token_urlsafe(32)
+        self.ui_token = (os.environ.get("JARVIS_UI_TOKEN") or "").strip() or secrets.token_urlsafe(32)
         self._already_blocked: set[str] = set()
         self._clients: set[queue.Queue[str]] = set()
         self._clients_lock = threading.Lock()
@@ -361,7 +435,9 @@ class WebJarvisOverlay:
         self._watchdog_grace_s = 60.0
 
         self._server = self._start_server()
-        self.url = f"http://{self._server.server_address[0]}:{self._server.server_address[1]}/"
+        host, port = self._server.server_address[0], self._server.server_address[1]
+        self.url = f"http://{host}:{port}/"
+        self.bootstrap_url = f"{self.url}?access_token={self.ui_token}"
         self._server_thread = threading.Thread(
             target=self._server.serve_forever,
             name="jarvis-web-ui",
@@ -379,7 +455,7 @@ class WebJarvisOverlay:
         if self._supervised:
             self.after(10_000, self._watchdog_check)
         if _env_truthy("JARVIS_WEB_UI_OPEN_BROWSER", True) and not self._supervised:
-            self.after(250, lambda: webbrowser.open(self.url))
+            self.after(250, lambda: webbrowser.open(self.bootstrap_url))
 
     @property
     def closed(self) -> bool:
@@ -448,7 +524,6 @@ class WebJarvisOverlay:
     def snapshot(self) -> dict[str, Any]:
         return {
             "version": JARVIS_VERSION_LABEL,
-            "uiToken": self.ui_token,
             "state": self._state,
             "mode": self._mode,
             "connection": {
@@ -470,6 +545,7 @@ class WebJarvisOverlay:
             "missionDetail": self._mission_detail,
             "audioTelemetry": self._audio_telemetry,
             "latency": self._latency_lines,
+            "latencySummary": self._latency_summary,
             "cameraActive": self._camera_active,
             "cameraFrame": self._camera_frame_b64,
             "cameraFocus": self._camera_focus,
@@ -759,6 +835,12 @@ class WebJarvisOverlay:
         self._latency_lines.append(line)
         self._latency_lines = self._latency_lines[-20:]
         self.emit("turnLatency", line)
+
+    def record_latency_summary(self, payload: dict[str, Any] | None) -> None:
+        if not isinstance(payload, dict):
+            return
+        self._latency_summary = dict(payload)
+        self.emit("latencySummary", self._latency_summary)
 
     def record_memory_tool_start(self, name: str, args: dict[str, Any] | None = None) -> None:
         if not self._is_memory_tool(name):
@@ -1111,7 +1193,7 @@ class WebJarvisOverlay:
 
         stream = self._bandwidth_payload(self._camera_stream_samples, now)
         preview = self._bandwidth_payload(self._camera_preview_samples, now)
-        names = ("gemini", "claude", "other")
+        names = ("gemini", "grok", "other")
         total_tokens = sum(int(tokens.get(name, 0)) for name in names)
         total_cost = sum(float(costs.get(name, 0.0)) for name in names)
         old_total_tokens = sum(int(oldest_tokens.get(name, 0)) for name in names)
@@ -1126,6 +1208,7 @@ class WebJarvisOverlay:
             "totalTokensPerMin": round(max(0.0, (total_tokens - old_total_tokens) * 60.0 / elapsed), 1),
             "totalUsdPerMin": round(max(0.0, (total_cost - old_total_cost) * 60.0 / elapsed), 6),
             "gemini": provider("gemini"),
+            "grok": provider("grok"),
             "claude": provider("claude"),
             "other": provider("other"),
             "camera": {
@@ -1151,14 +1234,15 @@ class WebJarvisOverlay:
         return {
             "period": report.period,
             "hardStop": report.hard_stop,
-            "gemini": _provider_payload(report.gemini, tokens["gemini"]),
-            "claude": _provider_payload(report.claude, tokens["claude"]),
+            "gemini": _provider_payload(report.gemini, tokens.get("gemini", 0)),
+            "grok": _provider_payload(report.claude, tokens.get("grok", tokens.get("claude", 0))),
+            "claude": _provider_payload(report.claude, tokens.get("claude", tokens.get("grok", 0))),
             "totalUsd": report.gemini.spent_usd + report.claude.spent_usd,
         }
 
     def _notify_blocked_budgets(self) -> None:
         report = self.gate.evaluate(self.tracker)
-        for provider, budget in (("gemini", report.gemini), ("claude", report.claude)):
+        for provider, budget in (("gemini", report.gemini), ("grok", report.claude)):
             if budget.blocked and provider not in self._already_blocked:
                 self._already_blocked.add(provider)
                 self._on_blocked(provider)

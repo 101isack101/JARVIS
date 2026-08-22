@@ -170,7 +170,7 @@ class CommandCenter:
             ("duration", "SESSION"),
             ("total", "TOTAL COST"),
             ("gemini", "GEMINI"),
-            ("claude", "CLAUDE"),
+            ("claude", "GROK"),
             ("memory", "MEMORY"),
         )
         for idx, (key, title) in enumerate(cards):

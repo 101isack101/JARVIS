@@ -713,6 +713,9 @@ class JarvisOverlay:
     def record_turn_latency(self, line: str) -> None:
         return None
 
+    def record_latency_summary(self, payload: dict | None = None) -> None:
+        return None
+
     @staticmethod
     def _is_memory_tool(name: str) -> bool:
         return name in {

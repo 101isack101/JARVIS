@@ -9,10 +9,11 @@ from .policy import is_secret_path
 
 
 SECRET_PATTERNS: list[tuple[re.Pattern[str], str]] = [
-    (re.compile(r"(?i)(ANTHROPIC_API_KEY|GEMINI_API_KEY|OPENAI_API_KEY|API_KEY|TOKEN|SECRET|PASSWORD)\s*=\s*['\"]?([^\s'\"#]+)"), r"\1=[REDACTED]"),
+    (re.compile(r"(?i)(ANTHROPIC_API_KEY|XAI_API_KEY|GEMINI_API_KEY|OPENAI_API_KEY|API_KEY|TOKEN|SECRET|PASSWORD)\s*=\s*['\"]?([^\s'\"#]+)"), r"\1=[REDACTED]"),
     (re.compile(r"(?i)(CLIENT_SECRET|SPOTIFY_CLIENT_SECRET|ACCESS_TOKEN|REFRESH_TOKEN|ID_TOKEN)\s*=\s*['\"]?([^\s'\"#]+)"), r"\1=[REDACTED]"),
     (re.compile(r"(?i)(client_secret|access_token|refresh_token|id_token|authorization_code|code)[\"']?\s*[:=]\s*[\"']?([A-Za-z0-9._~+/=-]{12,})"), r"\1=[REDACTED]"),
     (re.compile(r"sk-ant-[A-Za-z0-9_-]{20,}"), "[REDACTED_ANTHROPIC_KEY]"),
+    (re.compile(r"xai-[A-Za-z0-9_-]{20,}"), "[REDACTED_XAI_KEY]"),
     (re.compile(r"sk-[A-Za-z0-9_-]{20,}"), "[REDACTED_API_KEY]"),
     (re.compile(r"github_pat_[A-Za-z0-9_]{20,}"), "[REDACTED_GITHUB_TOKEN]"),
     (re.compile(r"gh[pousr]_[A-Za-z0-9_]{20,}"), "[REDACTED_GITHUB_TOKEN]"),

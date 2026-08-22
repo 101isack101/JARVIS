@@ -43,7 +43,7 @@ from audio.playback import AudioPlayer
 from audio.aec import AECStream, resample_24k_to_16k
 from audio.vad import VADGate
 from audio.wakeword import WakeWordGate
-from claude.reasoner import ClaudeReasoner
+from grok.reasoner import GrokReasoner
 from gemini.session import JarvisSession, SessionCallbacks, SessionConfig
 from gemini.system_prompt import SYSTEM_PROMPT
 from jarvis_version import JARVIS_VERSION_LABEL
@@ -246,7 +246,8 @@ WAKEWORD_THRESHOLD_DEFAULT = 0.5
 # Solo se muestran tools "lentos" (>1s tipicos) — los rapidos no necesitan
 # feedback porque Jarvis responde casi inmediatamente despues.
 TOOL_HINTS: dict[str, str] = {
-    "ask_claude_deep": "Consultando con Claude...",
+    "ask_grok_deep": "Consultando con Grok 4.6...",
+    "ask_claude_deep": "Consultando con Grok 4.6...",
     "screen_look": "Mirando tu pantalla...",
     "chrome_read_page": "Leyendo Chrome...",
     "study_mode": "Study Mode trabajando...",
@@ -278,7 +279,8 @@ def _env_float(name: str, default: float) -> float:
 # dividir la tarea. Se pueden subir por .env cuando Isaac quiera trabajo largo.
 TOOL_TIMEOUTS_S: dict[str, float] = {
     "ask_terra_code": _env_float("JARVIS_ASK_TERRA_TIMEOUT_S", 90.0),
-    "ask_claude_deep": _env_float("JARVIS_ASK_CLAUDE_TIMEOUT_S", 30.0),
+    "ask_grok_deep": _env_float("JARVIS_ASK_GROK_TIMEOUT_S", 60.0),
+    "ask_claude_deep": _env_float("JARVIS_ASK_GROK_TIMEOUT_S", 60.0),
     "study_mode": 60.0,
     "obs_memory": 900.0,
     "chrome_read_page": 20.0,
@@ -286,7 +288,8 @@ TOOL_TIMEOUTS_S: dict[str, float] = {
 
 LONG_TOOL_TIMEOUTS_S: dict[str, float] = {
     "ask_terra_code": _env_float("JARVIS_ASK_TERRA_LONG_TIMEOUT_S", 180.0),
-    "ask_claude_deep": _env_float("JARVIS_ASK_CLAUDE_LONG_TIMEOUT_S", 90.0),
+    "ask_grok_deep": _env_float("JARVIS_ASK_GROK_LONG_TIMEOUT_S", 90.0),
+    "ask_claude_deep": _env_float("JARVIS_ASK_GROK_LONG_TIMEOUT_S", 90.0),
 }
 
 
@@ -377,6 +380,18 @@ class Jarvis:
         self.gate = BudgetGate(history_provider_costs=self._historical_budget_costs)
         self.modes = ModeManager()
         self.approvals = ApprovalBroker(timeout_s=30.0)
+        self._user_spoke = False
+        self._watchdog_bg_logged = False
+        # El bridge HTTP tiene que existir ANTES de memoria/Grok: Tauri espera
+        # 8765 unos segundos y la sintesis de journal huerfano puede tardar >1 min.
+        self.overlay = create_overlay(
+            self.tracker,
+            self.gate,
+            on_close=lambda: self.stop(close_overlay=False),
+            on_command=self._on_ui_command,
+        )
+        self._install_ui_pump()
+        self.overlay.log_event("Inicializando JARVIS...", "info")
         self.actions = SafeActionExecutor(root=ROOT, approval_broker=self.approvals)
         self.screen = ScreenCapture(ROOT / "data" / "screenshots")
         from vision.camera import CameraCapture
@@ -437,30 +452,12 @@ class Jarvis:
         if self.session_continuity_enabled:
             try:
                 if self.session_journal.has_pending():
-                    log.info("Journal huérfano detectado; sintetizando sesión previa...")
-                    p = synthesize_and_save(
-                        self.session_journal,
-                        self.reasoner,
-                        self.vault,
-                        min_turns=self.session_min_turns,
-                        session_id=self.session_id,
-                    )
-                    if p is not None:
-                        self._startup_notices.append(("Memoria pendiente consolidada", "ok"))
-                        try:
-                            self.rag.index_file(p)
-                            self.rag.save()
-                            if self.semantic_memory is not None:
-                                registry = SourceRegistry(
-                                    vault=self.vault,
-                                    workspace_root=ROOT.parent,
-                                    sources=("obsidian",),
-                                )
-                                self.semantic_memory.index_documents(registry.iter_documents())
-                        except Exception as exc:
-                            log.warning(f"[WARN] no se indexó nota huérfana: {exc}")
-                    else:
-                        self._startup_notices.append(("Memoria pendiente sin consolidar", "warn"))
+                    log.info("Journal huérfano detectado; síntesis en background...")
+                    threading.Thread(
+                        target=self._synthesize_orphan_journal,
+                        name="JarvisOrphanJournal",
+                        daemon=True,
+                    ).start()
             except Exception as exc:
                 log.warning(f"[WARN] síntesis diferida falló: {exc}")
             try:
@@ -573,6 +570,7 @@ class Jarvis:
             session_journal=self.session_journal,
             agent_runtime=None,
             background_notifier=self._notify_background_completion,
+            on_mode_changed=self._on_work_mode_changed,
         )
         self.dispatcher = ToolDispatcher(self.tool_ctx)
         self.indexer = IncrementalIndexer(
@@ -588,17 +586,6 @@ class Jarvis:
         self.capture = AudioCapture(on_chunk=self._on_audio_chunk)
         self.vad: VADGate | None = None  # lazy load en modo libre
 
-        # Overlay
-        self.overlay = create_overlay(
-            self.tracker,
-            self.gate,
-            on_close=lambda: self.stop(close_overlay=False),
-            on_command=self._on_ui_command,
-        )
-        # Arranca el pump de UI en el main thread: drena _ui_thread y se re-arma.
-        # El primer after() se registra aquí (build corre en el main thread), así
-        # que toda llamada Tcl posterior queda en el thread del mainloop.
-        self._install_ui_pump()
         for message, level in self._startup_notices:
             self.overlay.log_event(message, level)
         self.approvals.set_handler(
@@ -676,7 +663,7 @@ class Jarvis:
                 ),
                 manual_activity_mode=True,
                 enable_input_transcription=True,
-                tools=[make_tool_object()],
+                tools=[make_tool_object(self.modes.mode)],
                 tracker=self.tracker,
                 tool_dispatcher=self.dispatcher,
                 tool_timeouts_s=TOOL_TIMEOUTS_S,
@@ -807,23 +794,27 @@ class Jarvis:
                 self.agent_runtime.stop(timeout_s=3.0)
         except Exception as exc:
             self._log(f"[WARN] Agent Runtime stop fallo: {exc}")
-        try: self.hotkey_listener.stop()
-        except Exception: pass
-        try: self.session.stop()
-        except Exception: pass
+        def _stop(name: str, fn) -> None:
+            try:
+                fn()
+            except Exception as exc:
+                self._log(f"[WARN] {name} stop fallo: {type(exc).__name__}: {exc}")
+
+        _stop("hotkeys", self.hotkey_listener.stop)
+        _stop("session", self.session.stop)
         self._tk(lambda: self.overlay.set_connection_status("stopped", ""), force=True)
-        try: self.indexer.stop()
-        except Exception: pass
-        try: self.capture.stop()
-        except Exception: pass
-        try: self.player.stop()
-        except Exception: pass
-        try: self._save_session_memory()
-        except Exception as exc: self._log(f"[WARN] memoria episodica fallo: {exc}")
-        try: self.persistence.flush_snapshot(self.tracker)
-        except Exception: pass
-        try: self._log(self.latency.summary_line())
-        except Exception as exc: self._log(f"[WARN] latency summary fallo: {exc}")
+        _stop("indexer", self.indexer.stop)
+        _stop("capture", self.capture.stop)
+        _stop("player", self.player.stop)
+        try:
+            self._save_session_memory()
+        except Exception as exc:
+            self._log(f"[WARN] memoria episodica fallo: {exc}")
+        _stop("persistence", lambda: self.persistence.flush_snapshot(self.tracker))
+        try:
+            self._log(self.latency.summary_line())
+        except Exception as exc:
+            self._log(f"[WARN] latency summary fallo: {exc}")
 
     def run(self) -> None:
         self.start()
@@ -840,6 +831,7 @@ class Jarvis:
         if self.mode != "PTT":
             self._log("[PTT] press IGNORADO: estamos en modo LIBRE")
             return
+        self._user_spoke = True
         self._audio_chunks_sent = 0
         self._log("[PTT] press -> activity_start + start_recording")
         self._set_overlay_state("listening")
@@ -990,8 +982,12 @@ class Jarvis:
 
     def _send_user_text(self, text: str) -> None:
         """Inyecta un turno de usuario escrito en la sesion Gemini (chat box)."""
+        if not getattr(self, "session", None):
+            self._log("[TEXT] ignorado: sesion Gemini aun no esta lista")
+            return
         if not self._gemini_budget_available("[TEXT] send"):
             return
+        self._user_spoke = True
         self._log(f"[TEXT] usuario -> {text[:80]}")
         self._tk(lambda: self.overlay.append_input(text + "\n"))
         self._set_overlay_state("thinking")
@@ -1198,30 +1194,68 @@ class Jarvis:
                 self._wakeword.reset()
             self._set_overlay_state("listening")
 
-        # Briefing matutino hablado: solo el primer connect del proceso.
+        # Briefing diferido: si se manda al conectar, un "hola" por PTT choca
+        # con Gemini generando el informe y el turno queda en silencio.
         if not self._briefing_sent and self._morning_cfg.enabled:
-            self._briefing_sent = True  # marcar antes para no reintentar en fallo
+            self.overlay.after(8000, self._maybe_send_morning_brief)
+
+    def _maybe_send_morning_brief(self) -> None:
+        if self._stopping or self._briefing_sent or self._user_spoke:
+            if self._user_spoke and not self._briefing_sent:
+                self._briefing_sent = True
+                self._log("[BRIEF] omitido: Isaac ya hablo")
+            return
+        self._briefing_sent = True
+        try:
+            if not self._gemini_budget_available("[BRIEF] morning"):
+                return
+            events_provider = None
+            if self._morning_cfg.calendar_enabled:
+                from integrations.google_calendar import today_events
+                cred = Path(os.environ.get("GOOGLE_CALENDAR_CREDENTIALS", ""))
+                events_provider = lambda: today_events(
+                    credentials_path=cred,
+                    token_path=Path("data") / "google_token.json",
+                )
+            data = collect_morning_brief(
+                vault_block=self._briefing_block_cache,
+                cfg=self._morning_cfg,
+                events_provider=events_provider,
+            )
+            prompt = render_brief_prompt(
+                data, max_age_days=self._morning_cfg.news_max_age_days)
+            self._log("[BRIEF] enviando briefing matutino hablado")
+            self.session.send_text(prompt)
+        except Exception as exc:
+            self._log(f"[WARN] briefing matutino falló: {exc}")
+
+    def _synthesize_orphan_journal(self) -> None:
+        try:
+            p = synthesize_and_save(
+                self.session_journal,
+                self.reasoner,
+                self.vault,
+                min_turns=self.session_min_turns,
+                session_id=self.session_id,
+            )
+            if p is None:
+                self._tk(lambda: self.overlay.log_event("Memoria pendiente sin consolidar", "warn"))
+                return
             try:
-                if self._gemini_budget_available("[BRIEF] morning"):
-                    events_provider = None
-                    if self._morning_cfg.calendar_enabled:
-                        from integrations.google_calendar import today_events
-                        cred = Path(os.environ.get("GOOGLE_CALENDAR_CREDENTIALS", ""))
-                        events_provider = lambda: today_events(
-                            credentials_path=cred,
-                            token_path=Path("data") / "google_token.json",
-                        )
-                    data = collect_morning_brief(
-                        vault_block=self._briefing_block_cache,
-                        cfg=self._morning_cfg,
-                        events_provider=events_provider,
+                self.rag.index_file(p)
+                self.rag.save()
+                if self.semantic_memory is not None:
+                    registry = SourceRegistry(
+                        vault=self.vault,
+                        workspace_root=ROOT.parent,
+                        sources=("obsidian",),
                     )
-                    prompt = render_brief_prompt(
-                        data, max_age_days=self._morning_cfg.news_max_age_days)
-                    self._log("[BRIEF] enviando briefing matutino hablado")
-                    self.session.send_text(prompt)
+                    self.semantic_memory.index_documents(registry.iter_documents())
             except Exception as exc:
-                self._log(f"[WARN] briefing matutino falló: {exc}")
+                log.warning(f"[WARN] no se indexó nota huérfana: {exc}")
+            self._tk(lambda: self.overlay.log_event("Memoria pendiente consolidada", "ok"))
+        except Exception as exc:
+            log.warning(f"[WARN] síntesis diferida falló: {exc}")
 
     def _on_connection_status(self, status: str, detail: str = "") -> None:
         self._tk(lambda: self.overlay.set_connection_status(status, detail))
@@ -1273,7 +1307,7 @@ class Jarvis:
         """Llamado desde JarvisSession antes de despachar un tool.
 
         Muestra hint humano en el overlay para que Isaac sepa que Jarvis
-        esta trabajando (especialmente importante con ask_claude_deep
+        esta trabajando (especialmente importante con ask_grok_deep
         donde Gemini queda mudo varios segundos esperando el response).
         """
         hint = TOOL_HINTS.get(name)
@@ -1337,11 +1371,20 @@ class Jarvis:
     def _on_turn_complete(self) -> None:
         # Cierra metricas del turno y loguea una linea condensada con TTFB.
         # mark_turn_complete devuelve el turno cerrado para logueo inmediato.
-        turn = self.latency.mark_turn_complete()
+        pending = 0
+        try:
+            pending = self.session.pending_background_count()
+        except Exception:
+            pending = 0
+        turn = self.latency.mark_turn_complete(deferred_pending=pending)
         if turn is not None:
             line = self.latency.format_turn(turn)
             self._log(line)
             self._tk(lambda l=line: self.overlay.record_turn_latency(l))
+            summary = self.latency.snapshot()
+            recorder = getattr(self.overlay, "record_latency_summary", None)
+            if callable(recorder):
+                self._tk(lambda s=summary: recorder(s))
         if self.mode == "PTT":
             self._set_overlay_state("idle")
         # En LIBRE: NO cambiar estado a "listening" aqui; el player puede seguir
@@ -1496,6 +1539,7 @@ class Jarvis:
             self._thinking_since_ms = int(time.time() * 1000)
         elif state in ("idle", "listening", "speaking", "blocked"):
             self._thinking_since_ms = None
+            self._watchdog_bg_logged = False
         self._tk(
             lambda s=state: self.overlay.set_state(s),
             coalesce_key="overlay_state",
@@ -1513,6 +1557,28 @@ class Jarvis:
         except Exception:
             pass
 
+    def _has_background_work(self) -> bool:
+        session = getattr(self, "session", None)
+        try:
+            if session is not None and session.has_background_work():
+                return True
+        except Exception:
+            pass
+        runtime = getattr(self, "agent_runtime", None)
+        return bool(runtime is not None and getattr(runtime, "active_mission_id", None))
+
+    def _on_work_mode_changed(self, mode: str) -> None:
+        """Actualiza el catalogo Live al cambiar modo, reconectando solo si idle."""
+        session = getattr(self, "session", None)
+        if session is None:
+            return
+        try:
+            session.config.tools = [make_tool_object(mode)]
+            session.request_tool_refresh()
+            self._log(f"tools Live actualizadas para modo {mode}")
+        except Exception as exc:
+            self._log(f"[WARN] no se pudieron actualizar tools del modo: {exc}")
+
     def _schedule_thinking_watchdog(self) -> None:
         if self._stopping:
             return
@@ -1521,10 +1587,20 @@ class Jarvis:
             if self._thinking_since_ms is not None:
                 elapsed = int(time.time() * 1000) - self._thinking_since_ms
                 if elapsed >= THINKING_WATCHDOG_MS:
-                    self._log(f"[WATCHDOG] thinking > {elapsed}ms; restaurando estado")
-                    self._thinking_since_ms = None
-                    self.overlay.set_state("idle" if self.mode == "PTT" else "listening")
-                    self.overlay.append_output("\n[Jarvis: sigo escuchando; el turno anterior tardo mucho.]\n")
+                    self.latency.record_watchdog()
+                    if self._has_background_work():
+                        if not self._watchdog_bg_logged:
+                            self._watchdog_bg_logged = True
+                            self._log(
+                                f"[WATCHDOG] thinking > {elapsed}ms; "
+                                "trabajo en segundo plano sigue"
+                            )
+                            self.overlay.log_event("Sigo trabajando en segundo plano")
+                    else:
+                        self._log(f"[WATCHDOG] thinking > {elapsed}ms; restaurando estado")
+                        self._thinking_since_ms = None
+                        self.overlay.set_state("idle" if self.mode == "PTT" else "listening")
+                        self.overlay.append_output("\n[Jarvis: sigo escuchando; el turno anterior tardo mucho.]\n")
             self.overlay.after(THINKING_WATCHDOG_MS, self._schedule_thinking_watchdog)
         except Exception:
             pass
@@ -1536,20 +1612,22 @@ class Jarvis:
         elif period == "weekly":
             hours = 24 * 7
         else:
-            return {"gemini": 0.0, "claude": 0.0, "other": 0.0}
+            return {"gemini": 0.0, "grok": 0.0, "claude": 0.0, "other": 0.0}
         return self.persistence.cost_by_provider_window(
             hours_back=hours,
             exclude_session_id=self.session_id,
         )
 
-    def _build_reasoner(self) -> ClaudeReasoner | None:
-        if not os.environ.get("ANTHROPIC_API_KEY"):
-            self._log("ANTHROPIC_API_KEY no configurada; ask_claude_deep queda desactivada")
+    def _build_reasoner(self) -> GrokReasoner | None:
+        from grok.reasoner import resolve_xai_api_key
+
+        if not resolve_xai_api_key():
+            self._log("XAI_API_KEY no configurada; ask_grok_deep queda desactivada")
             return None
         try:
-            return ClaudeReasoner(tracker=self.tracker)
+            return GrokReasoner(tracker=self.tracker)
         except Exception as exc:
-            self._log(f"[WARN] ClaudeReasoner no disponible: {type(exc).__name__}: {exc}")
+            self._log(f"[WARN] GrokReasoner no disponible: {type(exc).__name__}: {exc}")
             return None
 
     def _build_code_reasoner(self) -> TerraCodeReasoner | None:
@@ -1682,7 +1760,7 @@ def main() -> int:
     _install_crash_capture()
     print("=" * 60)
     print("  JARVIS — Asistente Conversacional Tiempo Real")
-    print("  Sesion local · Sonnet 4.6 + Gemini 3.1 Flash Live")
+    print("  Sesion local · Grok 4.6 + Gemini 3.1 Flash Live")
     print(f"  Version: {JARVIS_VERSION_LABEL}")
     print("=" * 60)
 

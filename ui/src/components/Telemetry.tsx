@@ -77,12 +77,12 @@ export default function Telemetry({ budget, memory }: Props) {
           tokensLabel={budget.gemini.tokensLabel}
         />
         <BudgetRing
-          label="Claude"
-          pct={budget.claude.pct}
-          status={budget.claude.status}
-          spent={budget.claude.spentUsd}
-          limit={budget.claude.limitUsd}
-          tokensLabel={budget.claude.tokensLabel}
+          label="Grok"
+          pct={(budget.grok ?? budget.claude).pct}
+          status={(budget.grok ?? budget.claude).status}
+          spent={(budget.grok ?? budget.claude).spentUsd}
+          limit={(budget.grok ?? budget.claude).limitUsd}
+          tokensLabel={(budget.grok ?? budget.claude).tokensLabel}
         />
       </div>
 

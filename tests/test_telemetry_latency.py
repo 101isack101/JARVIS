@@ -141,7 +141,33 @@ def test_format_turn_compacto_con_tools():
     assert "TTFB=1500ms" in s
     assert "speech=1500ms" in s
     assert "ask_claude_deep:8420" in s
+    assert "reason=blocking_tool" in s
     assert "interrupted" not in s
+
+
+def test_slow_reason_model_vs_ok():
+    fast = TurnLatency(t_user_end_ms=0.0, t_first_audio_ms=900.0, t_turn_complete_ms=2000.0)
+    slow = TurnLatency(t_user_end_ms=0.0, t_first_audio_ms=4000.0, t_turn_complete_ms=5000.0)
+    assert fast.slow_reason == "ok"
+    assert slow.slow_reason == "model"
+
+
+def test_record_watchdog_y_snapshot():
+    tr = LatencyTracker()
+    tr.mark_user_end()
+    tr.record_watchdog()
+    tr.record_tool("jarvis_recall", 10.0)
+    time.sleep(0.01)
+    tr.mark_first_audio()
+    turn = tr.mark_turn_complete(deferred_pending=2)
+    assert turn is not None
+    assert turn.watchdog_fired is True
+    assert turn.deferred_pending == 2
+    snap = tr.snapshot()
+    assert snap["n"] == 1
+    assert snap["watchdog_n"] == 1
+    assert snap["last_slow_reason"] == "ok"
+    assert snap["deferred_pending"] == 2
 
 
 def test_format_turn_marca_interrumpidos():

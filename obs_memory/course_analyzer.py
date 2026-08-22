@@ -9,8 +9,6 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-import anthropic
-
 from .media import extract_audio_segment, extract_keyframes_segment, video_duration_s
 
 
@@ -38,12 +36,22 @@ def _strip_json_fences(text: str) -> str:
 class OBSCourseAnalyzer:
     """Turns a course recording into Obsidian-ready study notes."""
 
-    def __init__(self, *, transcriber, config, model: str = "claude-sonnet-4-6") -> None:
+    def __init__(self, *, transcriber, config, model: str | None = None) -> None:
         self.transcriber = transcriber
         self.config = config
-        self.model = model
-        api_key = os.environ.get("ANTHROPIC_API_KEY")
-        self.client = anthropic.Anthropic(api_key=api_key) if api_key else None
+        self.model = model or os.environ.get("JARVIS_GROK_MODEL", "grok-4.6")
+        from grok.reasoner import resolve_xai_api_key
+
+        api_key = resolve_xai_api_key()
+        self.client = None
+        if api_key:
+            from openai import OpenAI
+
+            self.client = OpenAI(
+                api_key=api_key,
+                base_url=os.environ.get("JARVIS_GROK_BASE_URL", "https://api.x.ai/v1"),
+                timeout=120,
+            )
 
     def analyze(
         self,
@@ -118,19 +126,7 @@ class OBSCourseAnalyzer:
                 "diagrams_described": [],
                 "_fallback_transcript": transcript[:2000],
             }
-        user_content = []
-        for fp in frame_paths:
-            user_content.append(
-                {
-                    "type": "image",
-                    "source": {
-                        "type": "base64",
-                        "media_type": "image/png",
-                        "data": _encode_image(fp),
-                    },
-                }
-            )
-        user_content.append(
+        user_content: list[dict] = [
             {
                 "type": "text",
                 "text": (
@@ -140,21 +136,24 @@ class OBSCourseAnalyzer:
                     f"{transcript or '[Sin audio transcrito]'}"
                 ),
             }
-        )
+        ]
+        for fp in frame_paths:
+            user_content.append(
+                {
+                    "type": "image_url",
+                    "image_url": {"url": f"data:image/png;base64,{_encode_image(fp)}"},
+                }
+            )
         raw = ""
         try:
             response = self._create_with_retry(
                 max_tokens=1400,
-                system=[
-                    {
-                        "type": "text",
-                        "text": self._extract_prompt(),
-                        "cache_control": {"type": "ephemeral"},
-                    }
+                messages=[
+                    {"role": "system", "content": self._extract_prompt()},
+                    {"role": "user", "content": user_content},
                 ],
-                messages=[{"role": "user", "content": user_content}],
             )
-            raw = response.content[0].text if response.content else ""
+            raw = (response.choices[0].message.content if response.choices else "") or ""
             return json.loads(_strip_json_fences(raw))
         except json.JSONDecodeError as exc:
             return {"_raw": raw, "_parse_error": str(exc)}
@@ -165,8 +164,8 @@ class OBSCourseAnalyzer:
         chunks_json = json.dumps(chunks, ensure_ascii=False, indent=2)
         response = self._create_with_retry(
             max_tokens=3200,
-            system=[{"type": "text", "text": self._synthesis_prompt()}],
             messages=[
+                {"role": "system", "content": self._synthesis_prompt()},
                 {
                     "role": "user",
                     "content": (
@@ -174,24 +173,27 @@ class OBSCourseAnalyzer:
                         f"DURACION: {duration_min} min\n\n"
                         f"CHUNKS EXTRAIDOS:\n```json\n{chunks_json}\n```"
                     ),
-                }
+                },
             ],
         )
-        return (response.content[0].text if response.content else "").strip()
+        return ((response.choices[0].message.content if response.choices else "") or "").strip()
 
     def _create_with_retry(self, **kwargs):
         last = None
         for attempt in range(3):
             try:
-                return self.client.messages.create(model=self.model, **kwargs)
-            except (anthropic.RateLimitError, anthropic.APIStatusError) as exc:
+                return self.client.chat.completions.create(model=self.model, **kwargs)
+            except Exception as exc:
                 last = exc
                 status = getattr(exc, "status_code", None)
-                if isinstance(exc, anthropic.RateLimitError) or (status and status >= 500):
+                name = type(exc).__name__
+                if name in {"RateLimitError", "APITimeoutError", "InternalServerError"} or (
+                    isinstance(status, int) and (status == 429 or status >= 500)
+                ):
                     time.sleep(1.5**attempt)
                     continue
                 raise
-        raise last or RuntimeError("Claude retries exhausted")
+        raise last or RuntimeError("Grok retries exhausted")
 
     @staticmethod
     def _extract_prompt() -> str:

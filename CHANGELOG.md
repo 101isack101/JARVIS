@@ -4,6 +4,49 @@ Todas las versiones relevantes de JARVIS se documentan aqui.
 
 ## Unreleased
 
+## 1.09 - 2026-08-22
+
+Snapshot git de lo que estaba en working tree desde v1.07: incluye el corte
+1.08 (19 ago) que no se llego a commitear, mas los follow-ups de voz/tools.
+
+### Changed
+
+- Version unica 1.09 (Python `VERSION`, Tauri, React).
+
+### Voice / tools
+
+- Voz: `ask_grok_deep` ya no bloquea Gemini Live (mismo patron diferido que Terra).
+  Follow-ups se entregan solo cuando Isaac no esta en un turno (idle-gated).
+- Tools Live se filtran por modo de trabajo; `jarvis_task` disponible en `general`.
+- Watchdog de thinking no pone el HUD en idle si hay Grok/Terra/mision en curso.
+- Planner L1 tiene plantilla determinista si Terra no esta configurado.
+- Telemetria de turno incluye `reason=` (model/blocking_tool/watchdog) y
+  `latencySummary` en `/state`.
+
+## 1.08 - 2026-08-19
+
+### Changed
+
+- Reasoner profundo: Claude Sonnet -> **Grok 4.6** (`XAI_API_KEY`, tool `ask_grok_deep`).
+  `ask_claude_deep` queda como alias. Telemetria historica de Claude se conserva.
+- UI por defecto: `JARVIS_UI=web`. Tkinter sigue como fallback (`JARVIS_UI=tk`).
+- Version unica 1.08 (Python, Tauri, React). No hubo commit git; el corte
+  viaja dentro de 1.09.
+
+### Security
+
+- El bridge ya no expone `uiToken` en GET `/state`. Token por env `JARVIS_UI_TOKEN`,
+  cookie HttpOnly o header. `/state` y `/events` requieren auth. Origin loopback en POST.
+- Tauri genera el token, lo pasa al backend y ya no lee `/state` para apagar.
+- Alias de PowerShell (`ri`, `sc`, `mi`, ...) clasificados como write/destructive.
+
+### Added
+
+- Tools por modo de trabajo (`memory/tool_sets.py`): computer-use, camara y misiones
+  se rechazan en modo `general`.
+- `scripts/setup_venv.ps1` para entorno reproducible (`.venv`).
+- Tauri resuelve `JARVIS_DIR` / `JARVIS_PYTHON` / `.venv` y avisa si el backend no levanta.
+
 ## 1.07 - 2026-07-26
 
 ### Added

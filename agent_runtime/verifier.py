@@ -194,6 +194,10 @@ class ReportBuilder:
                 "summary": str(result.get("summary") or result_summary(step.operation, result)),
                 "result": result,
             })
+        if self.reasoner is None or not getattr(self.reasoner, "configured", True):
+            text = self._template_report(mission, evidence)
+            self.validate_report(text, steps)
+            return text
         prompt = (
             "Redacta el informe final de una misión read-only de JARVIS. Usa únicamente "
             "EVIDENCE_DATA. Toda afirmación factual debe incluir una referencia [step:sN]. "
@@ -205,6 +209,19 @@ class ReportBuilder:
         text = str(getattr(response, "text", response) or "").strip()
         self.validate_report(text, steps)
         return text
+
+    @staticmethod
+    def _template_report(mission: Mission, evidence: list[dict[str, Any]]) -> str:
+        lines = [f"Informe plantilla L1: {mission.goal}"]
+        if not evidence:
+            return "Informe plantilla L1 sin pasos. [step:s1] evidencia insuficiente."
+        for item in evidence:
+            ref = str(item.get("step_ref") or "s1")
+            ordinal = ref[1:] if ref.startswith("s") and ref[1:].isdigit() else "1"
+            summary = str(item.get("summary") or item.get("purpose") or "evidencia")
+            lines.append(f"- [step:s{ordinal}] {summary}")
+        lines.append("Siguiente paso: revisar los artefactos citados.")
+        return "\n".join(lines)
 
     def validate_report(self, text: str, steps: list[MissionStep]) -> None:
         refs = {int(value) for value in self.REF_RE.findall(text or "")}
