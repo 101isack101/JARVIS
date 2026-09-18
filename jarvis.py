@@ -43,6 +43,7 @@ from audio.playback import AudioPlayer
 from audio.aec import AECStream, resample_24k_to_16k
 from audio.vad import VADGate
 from audio.wakeword import WakeWordGate
+from audio.libre_turn import LibreSpeakGate
 from grok.reasoner import GrokReasoner
 from gemini.session import JarvisSession, SessionCallbacks, SessionConfig
 from gemini.system_prompt import SYSTEM_PROMPT
@@ -347,6 +348,8 @@ class Jarvis:
         self._libre_models_lock = threading.Lock()
         # True mientras Jarvis reproduce su voz en LIBRE (ventana de barge-in).
         self._libre_speaking = False
+        self._libre_gate = LibreSpeakGate()
+        self._gemini_awaiting_reply = False
         # Pico de score wake-word del turno hablado actual (diagnostico): nos
         # dice si tu "Hey JARVIS" se acerco al umbral o si el eco lo enmascara.
         self._wakeword_peak = 0.0
@@ -869,6 +872,7 @@ class Jarvis:
         self._log(f"[PTT] release -> {chunks} chunks enviados, activity_end")
         self.session.end_user_activity()
         self.latency.mark_user_end()
+        self._gemini_awaiting_reply = True
         self._set_overlay_state("thinking")
 
     def _on_toggle_mode(self) -> None:
@@ -900,6 +904,8 @@ class Jarvis:
                 self._aec.reset()
             self._libre_in_activity = False
             self._libre_speaking = False
+            self._libre_gate.reset()
+            self._gemini_awaiting_reply = False
             self.capture.start_recording()
             self._log("[MODE] LIBRE activado. VAD controla activity_start/end.")
             self._tk(lambda: self.overlay.set_mode("LIBRE"))
@@ -908,6 +914,8 @@ class Jarvis:
             self.mode = "PTT"
             self.capture.stop_recording()
             self._libre_speaking = False
+            self._libre_gate.reset()
+            self._gemini_awaiting_reply = False
             if self._aec is not None:
                 self._aec.reset()
             # Si VAD dejo activity abierta, cerrarla
@@ -1013,6 +1021,7 @@ class Jarvis:
         self._user_spoke = True
         self._log(f"[TEXT] usuario -> {text[:80]}")
         self._tk(lambda: self.overlay.append_input(text + "\n"))
+        self._gemini_awaiting_reply = True
         self._set_overlay_state("thinking")
         self.latency.mark_user_end()
         self.session.send_text(text)
@@ -1090,7 +1099,7 @@ class Jarvis:
             #    de alta confianza para cortarlo. Nada de esto se manda a Gemini
             #    hasta que el barge-in se confirma (ver _trigger_barge_in).
             #  - barge-in OFF: echo guard clasico, ignoramos el mic.
-            if self._libre_speaking:
+            if self._libre_speaking or self._libre_gate.speaking:
                 self._detect_barge_in(pcm_bytes)
                 return
             if self.player.is_playing():
@@ -1115,6 +1124,7 @@ class Jarvis:
                     if getattr(self, "_libre_in_activity", False):
                         self._libre_in_activity = False
                         self._last_activity_end_ms = now_ms
+                        self._gemini_awaiting_reply = True
                         self._log("[VAD] silencio -> activity_end")
                         self.session.end_user_activity()
                         self.latency.mark_user_end()
@@ -1287,6 +1297,8 @@ class Jarvis:
         # Marca TTFB en el primer chunk del turno. LatencyTracker.mark_first_audio
         # es idempotente por turno: solo cuenta la primera llamada.
         self.latency.mark_first_audio()
+        self._gemini_awaiting_reply = False
+        self._libre_gate.on_audio()
         # En LIBRE manejamos el eco segun haya wake-word disponible:
         #  - con wake-word: dejamos el mic VIVO para escuchar "Hey JARVIS" y
         #    poder cortar a Jarvis. Marcamos el inicio del turno hablado (1 vez)
@@ -1323,6 +1335,9 @@ class Jarvis:
         # Barge-in: limpia la cola de audio del player
         n = self.player.interrupt()
         self.latency.mark_interrupted()
+        self._libre_gate.on_interrupt()
+        self._libre_speaking = False
+        self._gemini_awaiting_reply = False
         self._log(f"Interrumpido (descarte {n} chunks de audio)")
         self._set_overlay_state("listening")
 
@@ -1410,7 +1425,11 @@ class Jarvis:
                 self._tk(lambda s=summary: recorder(s))
         if self.mode == "PTT":
             self._set_overlay_state("idle")
-        # En LIBRE: NO cambiar estado a "listening" aqui; el player puede seguir
+        else:
+            self._libre_gate.on_turn_complete()
+            if not self.player.is_playing():
+                self._finish_libre_playback()
+        # En LIBRE: NO cambiar estado a "listening" aqui si el player sigue
         # reproduciendo. _on_playback_complete lo hara cuando la cola se vacie.
         # Append nueva linea para separar turnos en transcript
         self._tk(lambda: self.overlay.append_output("\n"))
@@ -1450,35 +1469,38 @@ class Jarvis:
         """
         if self.mode != "LIBRE" or self._stopping:
             return
-        # Jarvis termino de hablar sin barge-in: cerrar la ventana de barge-in.
-        # Diagnostico: si el pico de wake-word fue notable pero no llego al
-        # umbral, lo logueamos para poder calibrar (eco vs umbral vs acento).
+        if not self._libre_gate.on_underflow():
+            return
+        self._finish_libre_playback()
+
+    def _finish_libre_playback(self) -> None:
+        if self.mode != "LIBRE" or self._stopping:
+            return
         if self._libre_speaking and self._wakeword is not None and self._wakeword_peak > 0.1:
             erle = f", AEC ERLE peak={self._aec_erle_peak:.1f}dB" if self._aec is not None else ""
             self._log(
                 f"[BARGE-IN] wake-word peak={self._wakeword_peak:.2f} este turno "
                 f"(umbral {self._wakeword.threshold:.2f}){erle} — no disparo"
             )
-        if self._libre_speaking or self.mode == "LIBRE":
-            payload: dict = {}
-            if self._aec is not None:
-                payload["erlePeakDb"] = round(float(self._aec_erle_peak), 1)
-            if self._wakeword is not None:
-                payload["wakewordPeak"] = round(float(self._wakeword_peak), 2)
-            if payload:
-                self._tk(lambda p=payload: self.overlay.record_audio_telemetry(p))
+        payload: dict = {}
+        if self._aec is not None:
+            payload["erlePeakDb"] = round(float(self._aec_erle_peak), 1)
+        if self._wakeword is not None:
+            payload["wakewordPeak"] = round(float(self._wakeword_peak), 2)
+        if payload:
+            self._tk(lambda p=payload: self.overlay.record_audio_telemetry(p))
         self._libre_speaking = False
+        self._gemini_awaiting_reply = False
         if self._wakeword is not None:
             self._wakeword.reset()
         if self._aec is not None:
             self._aec.reset()
         if self.vad is not None:
-            self.vad.reset()  # limpiar estado VAD por si capto eco residual
-        # Con barge-in ON el mic nunca se detuvo (start_recording es no-op);
-        # con barge-in OFF aqui se reanuda tras el anti-echo.
+            self.vad.reset()
         self.capture.start_recording()
         self._log("[LIBRE] playback completo -> mic reanudado")
         self._set_overlay_state("listening")
+        self._libre_gate.reset()
 
     def _on_error(self, exc: BaseException) -> None:
         record_error("jarvis.session", exc=exc, context={"handler": "_on_error"})
@@ -1611,7 +1633,7 @@ class Jarvis:
                 elapsed = int(time.time() * 1000) - self._thinking_since_ms
                 if elapsed >= THINKING_WATCHDOG_MS:
                     self.latency.record_watchdog()
-                    if self._has_background_work():
+                    if self._has_background_work() or self._gemini_awaiting_reply or self._libre_gate.waiting_for_server:
                         if not self._watchdog_bg_logged:
                             self._watchdog_bg_logged = True
                             self._log(
