@@ -89,6 +89,12 @@ dependen de llamadas reales a modelos.
   constitución §10. Writes de MCP/organizer permanecen en plano conversacional
   con HITL + V&V de outcome.
 
+## Registro 2026-09-18 (L2)
+
+- `JARVIS_AGENT_AUTONOMY_LEVEL=L2` habilita writes de misión: `obsidian_*` y
+  `file_organizer_apply`. HITL fail-closed por step. `write_file` sigue
+  UNKNOWN_OPERATION. Delete de vault no entra.
+
 ## Regla para modificar esta constitución
 
 Todo cambio debe registrar fecha, razón y efecto sobre permisos. Ampliar autonomía requiere

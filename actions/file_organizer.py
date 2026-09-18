@@ -497,7 +497,7 @@ class FileOrganizer:
         except OSError as exc:
             return {"ok": False, "allowed": True, "executed": False, "error": f"{type(exc).__name__}: {exc}"}
 
-    def apply(self, plan_id: str) -> dict:
+    def apply(self, plan_id: str, *, already_approved: bool = False) -> dict:
         try:
             plan_path, plan = self._load_plan(plan_id)
             if plan.get("applied"):
@@ -505,7 +505,7 @@ class FileOrganizer:
             moves = plan.get("moves") or []
             if not moves:
                 return {"ok": True, "allowed": True, "executed": False, "message": "plan vacio"}
-            if not self._request_apply_approval(plan):
+            if not already_approved and not self._request_apply_approval(plan):
                 return {"ok": False, "allowed": False, "executed": False, "error": "organizacion rechazada o sin aprobacion HITL"}
             if self.mode != "prod":
                 return {

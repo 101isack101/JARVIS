@@ -597,6 +597,27 @@ class Jarvis:
         # Misiones durables read-only: separadas del turno de voz y apagadas por default.
         try:
             agent_cfg = AgentRuntimeConfig.from_env()
+            from mcp_obsidian import ops as mcp_ops
+            from memory.tools import _get_file_organizer
+
+            vault_path = str(self.vault.vault_path)
+            writers = {
+                "obsidian_create_note": lambda path, content: mcp_ops.create_note(
+                    path, content, vault_path=vault_path
+                ),
+                "obsidian_append_note": lambda path, content: mcp_ops.append_note(
+                    path, content, vault_path=vault_path
+                ),
+                "obsidian_update_note": lambda path, content: mcp_ops.update_note(
+                    path, content, vault_path=vault_path
+                ),
+                "obsidian_move_path": lambda path, destination: mcp_ops.move_path(
+                    path, destination, vault_path=vault_path
+                ),
+                "file_organizer_apply": lambda plan_id: _get_file_organizer(self.tool_ctx).apply(
+                    plan_id, already_approved=True
+                ),
+            }
             self.agent_runtime = build_agent_runtime(
                 root=ROOT,
                 reasoner=self.code_reasoner,
@@ -604,13 +625,15 @@ class Jarvis:
                 config=agent_cfg,
                 event_sink=self._on_agent_runtime_event,
                 tracker=self.tracker,
+                approval_broker=self.approvals,
+                writers=writers,
             )
             self.tool_ctx.agent_runtime = self.agent_runtime
             setter = getattr(self.overlay, "set_missions", None)
             if callable(setter):
                 setter(self.agent_runtime.list(limit=20).get("missions", []))
             if agent_cfg.enabled:
-                log.info("Agent Runtime v0 configurado (L1 read-only)")
+                log.info(f"Agent Runtime v0 configurado ({agent_cfg.autonomy_level})")
         except Exception as exc:
             self.agent_runtime = None
             log.warning(f"[WARN] Agent Runtime no pudo inicializarse: {type(exc).__name__}: {exc}")

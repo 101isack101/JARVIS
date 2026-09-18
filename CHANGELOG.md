@@ -12,6 +12,7 @@ Todas las versiones relevantes de JARVIS se documentan aqui.
 - `file_organizer.apply` no marca éxito sin destino en disco.
 - MCP create/append/move devuelven `verified` + `sha256`.
 - Dispatcher corta la misma write 4ª vez (`REPEAT_CAP`).
+- L2: misiones pueden `obsidian_create/append/update/move` y `file_organizer_apply` con HITL fail-closed. `write_file` sigue bloqueado.
 
 ### Changed
 

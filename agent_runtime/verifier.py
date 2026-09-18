@@ -152,6 +152,31 @@ class MissionVerifier:
             if result.get("returncode") != 0:
                 raise VerificationError("git result returncode != 0")
             checks.append("git_returncode")
+        elif step.operation in {
+            "obsidian_create_note",
+            "obsidian_append_note",
+            "obsidian_update_note",
+        }:
+            if result.get("verified") is not True:
+                raise VerificationError("write sin verified")
+            digest = result.get("sha256")
+            if not isinstance(digest, str) or len(digest) != 64:
+                raise VerificationError("write sin sha256")
+            if not isinstance(result.get("path"), str) or not result["path"].strip():
+                raise VerificationError("write sin path")
+            checks.append("write_verified")
+        elif step.operation == "obsidian_move_path":
+            if result.get("verified") is not True:
+                raise VerificationError("move sin verified")
+            if not isinstance(result.get("from"), str) or not isinstance(result.get("to"), str):
+                raise VerificationError("move sin from/to")
+            checks.append("move_verified")
+        elif step.operation == "file_organizer_apply":
+            if result.get("verified") is not True:
+                raise VerificationError("apply sin verified")
+            if not isinstance(result.get("applied_count"), int) or result["applied_count"] < 1:
+                raise VerificationError("apply sin applied_count")
+            checks.append("apply_verified")
         else:
             raise VerificationError("operacion sin verifier", code="UNKNOWN_OPERATION")
         return {"status": "passed", "checks": checks, "summary": result_summary(step.operation, result)}

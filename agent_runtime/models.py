@@ -289,9 +289,10 @@ def validate_limits(max_steps: Any, deadline_seconds: Any, *, configured_max_ste
     return max_steps, deadline_seconds
 
 
-def make_mission(*, goal: str, root_path: str, max_steps: int, deadline_seconds: int, planner_model: str | None = None) -> Mission:
+def make_mission(*, goal: str, root_path: str, max_steps: int, deadline_seconds: int, planner_model: str | None = None, autonomy_level: str = "L1") -> Mission:
     goal = validate_goal(goal)
     max_steps, deadline_seconds = validate_limits(max_steps, deadline_seconds)
+    level = "L2" if str(autonomy_level or "").strip().upper() == "L2" else "L1"
     return Mission(
         id=new_id("msn"),
         goal=goal,
@@ -300,6 +301,7 @@ def make_mission(*, goal: str, root_path: str, max_steps: int, deadline_seconds:
         max_steps=max_steps,
         deadline_seconds=deadline_seconds,
         planner_model=planner_model,
+        autonomy_level=level,
     )
 
 

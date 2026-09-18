@@ -24,7 +24,7 @@ from .models import (
 )
 from .planner import MissionPlanner, PlannerConfig, PlannerError
 from .store import MissionNotFound, MissionStore
-from .tools import MissionPolicy, ReadOnlyToolAdapter, result_summary
+from .tools import MissionPolicy, ReadOnlyToolAdapter, READ_ONLY_OPERATIONS, WRITE_OPERATIONS, result_summary
 from .verifier import ArtifactStore, MissionVerifier, ReportBuilder, VerificationError
 
 
@@ -55,9 +55,11 @@ class AgentRuntimeConfig:
     max_active: int = 1
     artifact_max_chars: int = 20000
     planner_max_tokens: int = 1800
+    autonomy_level: str = "L1"
 
     @classmethod
     def from_env(cls) -> "AgentRuntimeConfig":
+        raw_level = (os.environ.get("JARVIS_AGENT_AUTONOMY_LEVEL") or "L1").strip().upper()
         return cls(
             enabled=_env_bool("JARVIS_AGENT_RUNTIME_ENABLED", False),
             max_steps=_env_int("JARVIS_AGENT_MAX_STEPS", 8, 1, 8),
@@ -65,6 +67,7 @@ class AgentRuntimeConfig:
             max_active=_env_int("JARVIS_AGENT_MAX_ACTIVE", 1, 1, 1),
             artifact_max_chars=_env_int("JARVIS_AGENT_ARTIFACT_MAX_CHARS", 20000, 1000, 100000),
             planner_max_tokens=_env_int("JARVIS_AGENT_PLANNER_MAX_TOKENS", 1800, 256, 4096),
+            autonomy_level="L2" if raw_level == "L2" else "L1",
         )
 
 
@@ -156,6 +159,7 @@ class AgentRuntimeService:
                     deadline_seconds if deadline_seconds is not None else self.config.deadline_seconds
                 ),
                 planner_model=self.planner.model,
+                autonomy_level=self.config.autonomy_level,
             )
         except ContractError as exc:
             return {"ok": False, "error_code": exc.code, "error": str(exc)}
@@ -604,18 +608,30 @@ def build_agent_runtime(
     event_sink: EventSink | None = None,
     budget_check: Callable[[], bool] | None = None,
     tracker: Any | None = None,
+    approval_broker: Any | None = None,
+    writers: dict[str, Any] | None = None,
 ) -> AgentRuntimeService:
     store = MissionStore(root / "data" / "agent_runtime" / "agent_runtime.db")
-    policy = MissionPolicy(root)
-    tools = ReadOnlyToolAdapter(executor, policy=policy, max_result_chars=config.artifact_max_chars)
+    policy = MissionPolicy(root, autonomy_level=config.autonomy_level)
+    tools = ReadOnlyToolAdapter(
+        executor,
+        policy=policy,
+        max_result_chars=config.artifact_max_chars,
+        approval_broker=approval_broker,
+        writers=writers,
+    )
     artifacts = ArtifactStore(
         root / "data" / "agent_runtime" / "artifacts",
         max_chars=config.artifact_max_chars,
     )
     verifier = MissionVerifier(policy=policy, artifacts=artifacts)
+    operations = dict(READ_ONLY_OPERATIONS)
+    if config.autonomy_level == "L2":
+        operations.update(WRITE_OPERATIONS)
     planner = MissionPlanner(
         reasoner,
         config=PlannerConfig(max_output_tokens=config.planner_max_tokens),
+        operations=operations,
     )
     reporter = ReportBuilder(reasoner, artifacts=artifacts, max_output_tokens=config.planner_max_tokens)
     return AgentRuntimeService(

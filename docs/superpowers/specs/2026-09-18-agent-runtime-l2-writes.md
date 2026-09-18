@@ -1,6 +1,6 @@
 # Spec L2 — escrituras como steps de misión
 
-Estado: draft. No implementar en v1.10.
+Estado: activo en v1.10+ via `JARVIS_AGENT_AUTONOMY_LEVEL=L2`. HITL por step write.
 
 ## Objetivo
 
