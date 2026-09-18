@@ -18,6 +18,7 @@ Patron:
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import webbrowser
@@ -42,6 +43,15 @@ from .tool_sets import is_tool_allowed_for_mode, tools_for_mode
 from .session_summary import current_session_recall as recall_current_session
 from .session_summary import search_session_summaries
 from .triage import triage_memory, update_project_memory_card
+
+WRITE_REPEAT_TOOLS = frozenset({
+    "file_organizer",
+    "desktop_icons",
+    "obsidian_mcp",
+    "jarvis_run_safe_command",
+    "jarvis_open_powershell",
+})
+WRITE_REPEAT_CAP = 3
 
 
 @dataclass
@@ -1684,6 +1694,7 @@ class ToolDispatcher:
             "ask_grok_deep": lambda **kw: ask_grok_deep_async(ctx, **kw),
             "ask_claude_deep": lambda **kw: ask_grok_deep_async(ctx, **kw),
         }
+        self._repeat_counts: dict[str, int] = {}
 
     def is_async(self, name: str) -> bool:
         return name in self._async_tools
@@ -1710,6 +1721,16 @@ class ToolDispatcher:
                 "mode": mode,
                 "allowed_tools": allowed,
             }
+        if name in WRITE_REPEAT_TOOLS:
+            key = name + ":" + json.dumps(args or {}, sort_keys=True, default=str)
+            count = self._repeat_counts.get(key, 0) + 1
+            self._repeat_counts[key] = count
+            if count > WRITE_REPEAT_CAP:
+                return {
+                    "ok": False,
+                    "error_code": "REPEAT_CAP",
+                    "error": f"tool {name} repetida {count} veces con los mismos args",
+                }
         try:
             return fn(**(args or {}))
         except TypeError as e:

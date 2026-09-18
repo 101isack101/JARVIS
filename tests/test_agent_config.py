@@ -1,3 +1,5 @@
+from pathlib import Path
+
 from agent_runtime.runtime import AgentRuntimeConfig
 
 
@@ -24,3 +26,8 @@ def test_agent_runtime_env_is_clamped(monkeypatch):
     assert cfg.max_steps == 8
     assert cfg.deadline_seconds == 30
     assert cfg.max_active == 1
+
+
+def test_env_example_documents_l1_canary_on():
+    text = Path(".env.example").read_text(encoding="utf-8")
+    assert "JARVIS_AGENT_RUNTIME_ENABLED=true" in text

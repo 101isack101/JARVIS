@@ -4,7 +4,7 @@ Asistente estilo Gemini Live con voz bidireccional, visión de pantalla, compute
 
 > **Status:** Copiloto local funcional. Voz bidireccional, overlay, hotkeys, memoria RAG, Claude tool, vision/screen capture, action executor seguro, modos, telemetry y budgets ya existen.
 
-> **Version actual:** v1.09 — Grok 4.6 (diferido, idle-gated), auth del bridge sin token en `/state`, tools por modo
+> **Version actual:** v1.10 — V&V de writes locales, REPEAT_CAP, L1 canario documentado
 
 ---
 
@@ -134,6 +134,7 @@ Ejecutar los dos spikes en orden. Ambos deberían terminar en <30s.
 - **Hecho:** English Practice Mode activable por voz con `english_practice`
 - **Hecho:** UI Tauri + React 19 como modo principal (`jarvis-desktop.exe`): SSE bridge headless, watchdog anti-zombie, ApprovalModal HITL, CameraPanel live, Transcript markdown, Telemetry SVG
 - **Hecho:** Agent Runtime v0 con misiones read-only persistentes, ejecución background, cancelación, recovery, evidencia verificada y Mission Control en vivo
+- **Hecho:** V&V de outcome en `file_organizer.apply` y writes MCP; tope `REPEAT_CAP` de writes repetidas
 - **Pendiente:** Autopilot con confirmaciones y acciones de escritura controladas
 - **Pendiente:** Historial ampliado de errores y artefactos en el dashboard
 

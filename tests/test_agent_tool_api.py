@@ -46,3 +46,15 @@ def test_tool_is_declared_and_dispatched():
     result = dispatcher.call("jarvis_task", {"action": "list"})
     assert result["ok"] is True
     assert "jarvis_task" in dispatcher.tool_names
+
+
+def test_jarvis_task_create_does_not_accept_autonomy_level():
+    import pytest
+
+    with pytest.raises(TypeError):
+        jarvis_task(
+            ToolContext(vault=None, rag=None),
+            "create",
+            goal="Evaluar el estado técnico de JARVIS",
+            autonomy_level="L2",
+        )

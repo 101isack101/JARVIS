@@ -1,3 +1,5 @@
+from pathlib import Path
+
 from actions.file_organizer import FileOrganizer
 from security.approvals import AutoApprovalBroker
 
@@ -196,3 +198,41 @@ def test_file_organizer_apply_prod_moves_without_overwrite(tmp_path):
     assert existing.read_text(encoding="utf-8") == "existing"
     assert (target / "photo (2).png").read_text(encoding="utf-8") == "new"
     assert not item.exists()
+
+
+def test_verify_apply_outcome_detects_missing_destination(tmp_path):
+    from actions.file_organizer import verify_apply_outcome
+
+    src = tmp_path / "a.txt"
+    dest = tmp_path / "b.txt"
+    src.write_text("x", encoding="utf-8")
+    ok, errors = verify_apply_outcome(
+        [{"source": str(src), "destination": str(dest)}]
+    )
+    assert ok is False
+    assert errors
+
+
+def test_file_organizer_apply_prod_verifies_destination(tmp_path):
+    source = tmp_path / "Downloads"
+    source.mkdir()
+    item = source / "doc.pdf"
+    item.write_text("pdf", encoding="utf-8")
+    organizer = FileOrganizer(
+        allowed_roots=[source],
+        state_dir=tmp_path / "state",
+        mode="prod",
+        approval_broker=AutoApprovalBroker(approve=True),
+        strict_root_validation=False,
+    )
+    plan = organizer.plan(source_root=str(source))
+    result = organizer.apply(plan["plan_id"])
+
+    assert result["ok"] is True
+    assert result["executed"] is True
+    assert result["applied_count"] == 1
+    assert result["verified"] is True
+    assert not item.exists()
+    moved = Path(result["applied"][0]["destination"])
+    assert moved.exists()
+    assert moved.read_text(encoding="utf-8") == "pdf"

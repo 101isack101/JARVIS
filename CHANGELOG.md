@@ -4,6 +4,19 @@ Todas las versiones relevantes de JARVIS se documentan aqui.
 
 ## Unreleased
 
+## 1.10 - 2026-09-18
+
+### Security
+
+- MCP paths pasan por `assert_inside_root`.
+- `file_organizer.apply` no marca éxito sin destino en disco.
+- MCP create/append/move devuelven `verified` + `sha256`.
+- Dispatcher corta la misma write 4ª vez (`REPEAT_CAP`).
+
+### Changed
+
+- `.env.example` documenta L1 canario ON; default de código sigue OFF.
+
 ## 1.09 - 2026-08-22
 
 Snapshot git de lo que estaba en working tree desde v1.07: incluye el corte

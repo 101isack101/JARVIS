@@ -81,6 +81,14 @@ dependen de llamadas reales a modelos.
 - La creación explícita de una misión autoriza sus lecturas dentro del scope; no autoriza
   futuras escrituras.
 
+## Registro 2026-09-18
+
+- L1 canario: se documenta `JARVIS_AGENT_RUNTIME_ENABLED=true` en `.env.example`.
+  Default de código sigue `false`.
+- Autonomía L2 no habilitada. Ampliar requiere spec, threat model y tests de
+  constitución §10. Writes de MCP/organizer permanecen en plano conversacional
+  con HITL + V&V de outcome.
+
 ## Regla para modificar esta constitución
 
 Todo cambio debe registrar fecha, razón y efecto sobre permisos. Ampliar autonomía requiere

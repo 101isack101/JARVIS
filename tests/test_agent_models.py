@@ -65,3 +65,13 @@ def test_state_machine_rejects_invalid_transition():
     with pytest.raises(ContractError) as exc:
         ensure_transition(MissionStatus.QUEUED, MissionStatus.COMPLETED)
     assert exc.value.code == "INVALID_TRANSITION"
+
+
+def test_make_mission_autonomy_is_always_l1(tmp_path):
+    mission = make_mission(
+        goal="Evaluar el estado técnico de JARVIS",
+        root_path=str(tmp_path),
+        max_steps=3,
+        deadline_seconds=60,
+    )
+    assert mission.autonomy_level == "L1"

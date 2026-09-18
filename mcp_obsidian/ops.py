@@ -11,6 +11,7 @@ Guardrails:
 
 from __future__ import annotations
 
+import hashlib
 import os
 import shutil
 from pathlib import Path
@@ -18,7 +19,7 @@ from datetime import datetime, timezone
 
 from memory import notes as notes_mod
 from memory.obsidian_vault import ObsidianVault, VaultError
-from security.policy import is_secret_path
+from security.policy import SecurityError, assert_inside_root, is_secret_path
 from security.secret_filter import redact_secrets
 
 BLOCKED_PARTS = {".obsidian", ".trash", ".git"}
@@ -39,11 +40,11 @@ def _sanitize_rel_path(path: str, *, ensure_md: bool = False) -> str:
 
 def _resolve(vault: ObsidianVault, path: str, *, ensure_md: bool = False) -> Path:
     rel = _sanitize_rel_path(path, ensure_md=ensure_md)
-    target = (vault.vault_path / rel).resolve()
     try:
-        parts = target.relative_to(vault.vault_path).parts
-    except ValueError:
-        raise VaultError(f"path fuera del vault: {path}")
+        target = assert_inside_root(vault.vault_path / rel, vault.vault_path, label="path")
+    except SecurityError as exc:
+        raise VaultError(str(exc)) from exc
+    parts = target.relative_to(vault.vault_path.resolve()).parts
     if any(part in BLOCKED_PARTS or part.startswith(".") for part in parts):
         raise VaultError(f"path bloqueado por guardrails: {path}")
     if is_secret_path(target):
@@ -77,6 +78,17 @@ def _write_note_anywhere(
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(note.to_markdown(), encoding="utf-8")
     return note
+
+
+def _verify_written_file(target: Path) -> dict:
+    if not target.is_file():
+        return {"ok": False, "verified": False, "error": f"archivo no escrito: {target}"}
+    data = target.read_bytes()
+    return {
+        "verified": True,
+        "sha256": hashlib.sha256(data).hexdigest(),
+        "bytes": len(data),
+    }
 
 
 def list_folder(path: str = "", limit: int = 100, vault_path: str | None = None) -> dict:
@@ -138,7 +150,16 @@ def create_note(
     if target.exists():
         existing_fm = notes_mod.parse_note(target.read_text(encoding="utf-8"), target).frontmatter
     note = _write_note_anywhere(target, content, tags=tags or [], existing_frontmatter=existing_fm)
-    return {"ok": True, "path": _rel(vault, target), "title": note.title, "tags": note.tags}
+    check = _verify_written_file(target)
+    if not check.get("verified"):
+        return {"ok": False, **check}
+    return {
+        "ok": True,
+        "path": _rel(vault, target),
+        "title": note.title,
+        "tags": note.tags,
+        **check,
+    }
 
 
 def update_note(
@@ -169,7 +190,10 @@ def append_note(
         existing.body.rstrip() + section,
         existing_frontmatter=existing.frontmatter,
     )
-    return {"ok": True, "path": _rel(vault, target), "title": note.title}
+    check = _verify_written_file(target)
+    if not check.get("verified"):
+        return {"ok": False, **check}
+    return {"ok": True, "path": _rel(vault, target), "title": note.title, **check}
 
 
 def move_path(
@@ -192,7 +216,15 @@ def move_path(
         else:
             dst.unlink()
     shutil.move(str(src), str(dst))
-    return {"ok": True, "from": path, "to": _rel(vault, dst)}
+    if not dst.exists() or src.exists():
+        return {
+            "ok": False,
+            "verified": False,
+            "error": "outcome mismatch tras move",
+            "from": path,
+            "to": _rel(vault, dst),
+        }
+    return {"ok": True, "verified": True, "from": path, "to": _rel(vault, dst)}
 
 
 def delete_path(path: str, vault_path: str | None = None) -> dict:

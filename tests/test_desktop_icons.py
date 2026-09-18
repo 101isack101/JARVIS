@@ -52,3 +52,8 @@ def test_desktop_icon_arrange_requires_desktop_listview():
     assert result["ok"] is False
     assert result["executed"] is False
     assert "ListView" in result["error"]
+
+
+def test_desktop_icon_approval_fail_closed_without_broker():
+    controller = DesktopIconController(approval_broker=None, hwnd_provider=lambda: 0)
+    assert controller._request_approval("arrange", "x") is False

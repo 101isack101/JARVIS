@@ -172,6 +172,18 @@ def _dir_contains_blocked_path(path: Path) -> bool:
     return False
 
 
+def verify_apply_outcome(applied: list[dict]) -> tuple[bool, list[str]]:
+    errors: list[str] = []
+    for move in applied:
+        src = Path(move["source"])
+        dest = Path(move["destination"])
+        if not dest.exists():
+            errors.append(f"destino ausente: {dest}")
+        if src.exists():
+            errors.append(f"origen sigue existiendo: {src}")
+    return (not errors, errors)
+
+
 def _unique_destination(path: Path) -> Path:
     if not path.exists():
         return path
@@ -539,6 +551,30 @@ class FileOrganizer:
                 src.rename(dest)
                 applied.append({**move, "destination": str(dest)})
 
+            if not applied:
+                return {
+                    "ok": False,
+                    "allowed": True,
+                    "executed": False,
+                    "verified": False,
+                    "error": "ningun movimiento aplicado",
+                    "skipped_count": len(skipped),
+                    "skipped": skipped[:50],
+                }
+
+            verified, errors = verify_apply_outcome(applied)
+            if not verified:
+                return {
+                    "ok": False,
+                    "allowed": True,
+                    "executed": True,
+                    "verified": False,
+                    "error": "outcome mismatch: " + "; ".join(errors),
+                    "applied_count": len(applied),
+                    "applied": applied[:50],
+                    "skipped": skipped[:50],
+                }
+
             plan["applied"] = True
             plan["applied_at"] = _now_iso()
             plan["applied_count"] = len(applied)
@@ -548,6 +584,7 @@ class FileOrganizer:
                 "ok": True,
                 "allowed": True,
                 "executed": True,
+                "verified": True,
                 "mode": self.mode,
                 "applied_count": len(applied),
                 "skipped_count": len(skipped),

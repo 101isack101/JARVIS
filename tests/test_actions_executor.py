@@ -41,6 +41,14 @@ def test_safe_action_executor_blocks_powershell_aliases(tmp_path):
     assert ri.get("error") or ri["executed"] is False
 
 
+def test_safe_action_executor_blocks_mi_alias(tmp_path):
+    broker = AutoApprovalBroker(approve=False)
+    ex = SafeActionExecutor(root=tmp_path, mode="prod", approval_broker=broker)
+    mi = ex.run_powershell("mi a.txt b.txt", cwd=str(tmp_path))
+    assert mi["allowed"] is False
+    assert mi["executed"] is False
+
+
 def test_safe_action_executor_hard_blocks_sendkeys_without_hitl(tmp_path):
     broker = AutoApprovalBroker(approve=True)
     ex = SafeActionExecutor(root=tmp_path, mode="prod", approval_broker=broker)
