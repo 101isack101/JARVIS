@@ -48,3 +48,21 @@ def test_jarvis_log_error_patterns_are_journaled(tmp_path, monkeypatch):
     rows = [json.loads(line) for line in journal.read_text(encoding="utf-8").splitlines()]
     assert rows[-1]["source"] == "jarvis.log"
     assert "camera busy" in rows[-1]["message"]
+
+
+def test_tail_errors_returns_last_n_without_traceback_or_caller_path(tmp_path, monkeypatch):
+    from telemetry.error_journal import record_error, tail_errors
+
+    journal = tmp_path / "errors.jsonl"
+    monkeypatch.setenv("JARVIS_ERROR_JOURNAL_PATH", str(journal))
+    monkeypatch.setenv("JARVIS_ERROR_JOURNAL", "true")
+
+    for i in range(3):
+        record_error("test.tail", message=f"fallo {i}", context={"token": "sk-live-secret"})
+
+    rows = tail_errors(limit=2, path=tmp_path / "other.jsonl")
+
+    assert [row["message"] for row in rows] == ["fallo 1", "fallo 2"]
+    assert all("traceback" not in row for row in rows)
+    assert all("context" not in row for row in rows)
+    assert all(set(row) == {"ts", "severity", "source", "message"} for row in rows)

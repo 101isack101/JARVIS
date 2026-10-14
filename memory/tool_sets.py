@@ -32,6 +32,7 @@ ALWAYS_TOOLS: frozenset[str] = frozenset(
         # Crear/consultar misiones L1 no es computer-use; el runtime sigue
         # fail-closed si esta apagado o fuera de root.
         "jarvis_task",
+        "vision_note",
     }
 )
 

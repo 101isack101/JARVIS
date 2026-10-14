@@ -191,6 +191,13 @@ export interface Weather {
   code: number
 }
 
+export interface ErrorJournalEntry {
+  ts: string
+  severity: string
+  source: string
+  message: string
+}
+
 export interface ApprovalPayload {
   id: string
   risk: 'low' | 'medium' | 'high'
@@ -224,4 +231,5 @@ export interface JarvisSnapshot {
   cameraFocus?: { box: unknown; label: string } | null
   systemStats?: SystemStats | null
   weather?: Weather | null
+  errorJournal?: ErrorJournalEntry[]
 }

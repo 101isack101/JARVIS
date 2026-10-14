@@ -4,6 +4,15 @@ Todas las versiones relevantes de JARVIS se documentan aqui.
 
 ## Unreleased
 
+## 1.11 - 2026-10-14
+
+### Changed
+
+- Voz rapida sigue en Gemini Live.
+- Analisis, trabajo agentico y trabajo complejo van a Grok 4.7 (`ask_grok_deep`). Terra solo si Isaac lo pide por nombre.
+- `vision_note`: captura y, tras aprobacion, deja la nota en `JARVIS/01-CAPTURES/vision/`.
+- El HUD muestra el error journal, sin traceback ni secretos.
+
 ## 1.10 - 2026-09-18
 
 ### Security

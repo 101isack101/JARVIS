@@ -1,4 +1,4 @@
-"""grok/reasoner.py - Wrapper de Grok 4.6 como reasoner profundo de JARVIS.
+"""grok/reasoner.py - Wrapper de Grok 4.7 como reasoner de analisis y trabajo complejo.
 
 Lo invoca Gemini Live como function tool `ask_grok_deep` (alias `ask_claude_deep`).
 API xAI OpenAI-compatible: https://api.x.ai/v1
@@ -25,7 +25,7 @@ from telemetry.tracker import TokenTracker
 
 log = get_logger("reasoner")
 
-DEFAULT_MODEL = "grok-4.6"
+DEFAULT_MODEL = "grok-4.7"
 DEFAULT_MAX_TOKENS = 1024
 DEFAULT_BASE_URL = "https://api.x.ai/v1"
 MAX_RETRIES = 3
@@ -86,7 +86,7 @@ class ReasonerResponse:
 
 
 class GrokReasoner:
-    """Cliente Grok 4.6 (xAI) con token tracking."""
+    """Cliente Grok 4.7 (xAI) con token tracking."""
 
     def __init__(
         self,
@@ -117,10 +117,10 @@ class GrokReasoner:
     @staticmethod
     def _default_system_prompt() -> str:
         return (
-            "Eres Grok 4.6, invocado como reasoner profundo por JARVIS, "
-            "un agente conversacional en tiempo real para Isaac. "
-            "JARVIS usa Gemini Live para voz y te delega cuando necesita razonamiento profundo: "
-            "analisis, arquitectura, planning multi-paso, decisiones tecnicas. "
+            "Eres Grok 4.7, invocado por JARVIS para analisis, trabajo agentico y "
+            "trabajo complejo. JARVIS es un agente conversacional en tiempo real "
+            "para Isaac. Gemini Live lleva la voz rapida; tu entras cuando hace "
+            "falta analisis, arquitectura, planning o una decision tecnica. "
             "Responde SIEMPRE en espanol neutro latinoamericano formal. "
             "Trata a Isaac como 'senor' cuando aplique naturalmente. "
             "Mantén un tono sereno, preciso y tecnicamente riguroso. "

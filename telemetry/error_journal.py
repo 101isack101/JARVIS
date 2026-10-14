@@ -101,4 +101,37 @@ def record_error(
             pass
 
 
-__all__ = ["record_error"]
+def tail_errors(limit: int = 20, path: Path | None = None) -> list[dict[str, str]]:
+    """Last N journal rows for the HUD. Path argument is ignored.
+
+    Callers must not choose the file. Tracebacks and context stay on disk.
+    """
+    del path
+    target = _default_path()
+    if not target.is_file():
+        return []
+    capped = max(0, min(int(limit), 20))
+    if capped == 0:
+        return []
+    try:
+        lines = target.read_text(encoding="utf-8").splitlines()
+    except Exception:
+        return []
+    rows: list[dict[str, str]] = []
+    for line in lines[-capped:]:
+        try:
+            raw = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(raw, dict):
+            continue
+        rows.append({
+            "ts": str(raw.get("ts") or ""),
+            "severity": str(raw.get("severity") or "error"),
+            "source": str(raw.get("source") or ""),
+            "message": str(raw.get("message") or raw.get("error_message") or ""),
+        })
+    return rows
+
+
+__all__ = ["record_error", "tail_errors"]

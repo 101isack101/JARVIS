@@ -9,6 +9,7 @@ import remarkGfm from 'remark-gfm'
 import './index.css'
 import { useJarvis } from './useJarvis'
 import ApprovalModal from './components/ApprovalModal'
+import ErrorJournal from './components/ErrorJournal'
 import type {
   AgentToolEvent, AudioTelemetry, BudgetPayload, JarvisMode, JarvisState, LogEvent,
   ConversationMessage, RuntimeTelemetry, SystemStats as SystemStatsData, Weather,
@@ -952,6 +953,7 @@ export default function App() {
           />
           <MissionPanel missions={ui.missions} onCancel={cancelMission} onSelect={selectMission} />
           <TelemetryPanel telemetry={ui.runtimeTelemetry} budget={ui.budget} />
+          <ErrorJournal rows={ui.errorJournal} />
           <WeatherPanel weather={ui.weather} onRefresh={refreshWeather} />
           <CameraWidget active={ui.cameraActive} frame={ui.cameraFrame} focus={ui.cameraFocus} />
           <UptimePanel uptimeMs={uptimeMs} commands={commands} />

@@ -7,6 +7,7 @@ import type {
   RuntimeTelemetry, SystemStats, Weather,
   MissionEvent, MissionSummary,
   MissionDetail,
+  ErrorJournalEntry,
 } from './types'
 
 export interface JarvisUIState {
@@ -35,6 +36,7 @@ export interface JarvisUIState {
   cameraFocus: { box: unknown; label: string } | null
   systemStats: SystemStats | null
   weather: Weather | null
+  errorJournal: ErrorJournalEntry[]
 }
 
 const INITIAL: JarvisUIState = {
@@ -63,6 +65,7 @@ const INITIAL: JarvisUIState = {
   cameraFocus: null,
   systemStats: null,
   weather: null,
+  errorJournal: [],
 }
 
 type UiDispatch = Dispatch<SetStateAction<JarvisUIState>>
@@ -158,6 +161,7 @@ function applyCommand(set: UiDispatch, command: string, args: unknown[]) {
           cameraFocus: snap.cameraFocus ?? null,
           systemStats: snap.systemStats && Object.keys(snap.systemStats).length ? snap.systemStats : null,
           weather: snap.weather && Object.keys(snap.weather).length ? snap.weather : null,
+          errorJournal: snap.errorJournal ?? [],
         }
       }
       case 'setState':     return { ...prev, state: args[0] as JarvisState }
@@ -244,6 +248,7 @@ function applyCommand(set: UiDispatch, command: string, args: unknown[]) {
       case 'cameraFocus':     return { ...prev, cameraFocus: args[0] as { box: unknown; label: string } }
       case 'systemStats':     return { ...prev, systemStats: args[0] as SystemStats }
       case 'weather':         return { ...prev, weather: args[0] as Weather }
+      case 'errorJournal':   return { ...prev, errorJournal: (args[0] as ErrorJournalEntry[]) ?? [] }
       default: return prev
     }
   })

@@ -553,7 +553,15 @@ class WebJarvisOverlay:
             "runtimeTelemetry": self._runtime_telemetry_payload(),
             "systemStats": self._system_stats(),
             "weather": self._weather,
+            "errorJournal": self._error_journal_tail(),
         }
+
+    def _error_journal_tail(self) -> list[dict[str, str]]:
+        try:
+            from telemetry.error_journal import tail_errors
+            return tail_errors(limit=20)
+        except Exception:
+            return []
 
     def emit(self, command: str, *args: Any) -> None:
         payload = json.dumps(
@@ -1085,6 +1093,7 @@ class WebJarvisOverlay:
             self.emit("updateBudget", self._budget_payload())
             self.emit("runtimeTelemetry", self._runtime_telemetry_payload())
             self.emit("updateMemoryStats", self._memory_stats())
+            self.emit("errorJournal", self._error_journal_tail())
             stats = self._system_stats()
             if stats:
                 self.emit("systemStats", stats)

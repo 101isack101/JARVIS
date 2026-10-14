@@ -618,6 +618,62 @@ def camera_focus(ctx: ToolContext, label: str = "") -> dict:
     return {"found": True, "label": result.get("label", ""), "box_2d": result["box_2d"]}
 
 
+def vision_note(
+    ctx: ToolContext,
+    analysis: str = "",
+    title: str = "",
+    source: str = "screen",
+    reason: str = "",
+) -> dict:
+    """Captura y, con analisis, deja una nota en el vault tras aprobacion."""
+    from mcp_obsidian.ops import create_note
+    from security.secret_filter import redact_secrets
+    from vision.notes import build_vision_note, vision_note_relpath
+
+    kind = (source or "screen").strip().lower()
+    if kind not in {"screen", "camera"}:
+        return {"ok": False, "error": "source debe ser screen o camera"}
+    text = (analysis or "").strip()
+    if not text:
+        captured = camera_look(ctx, reason=reason or title) if kind == "camera" else screen_look(ctx, reason=reason or title)
+        if captured.get("captured"):
+            captured["needs_analysis"] = True
+            captured["note"] = (
+                "Imagen lista. Vuelve a llamar vision_note con analysis de lo visible. "
+                "No incluyas claves ni tokens."
+            )
+        return captured
+
+    captured = camera_look(ctx, reason=reason or title) if kind == "camera" else screen_look(ctx, reason=reason or title)
+    if not captured.get("captured"):
+        return captured
+    image_ref = str(captured.get("image_ref") or "")
+    body = build_vision_note(
+        source=kind,
+        image_ref=image_ref,
+        reason=reason,
+        analysis=text,
+        title=title or reason or "Captura visual",
+    )
+    rel = vision_note_relpath(title or reason or "captura")
+    preview = redact_secrets(body)[:400]
+    denied = _require_mcp_approval(ctx, "create_note", {"path": rel, "content": preview})
+    if denied is not None:
+        return denied
+    try:
+        written = create_note(
+            rel,
+            body,
+            tags=["vision", "jarvis", kind],
+            vault_path=str(ctx.vault.vault_path),
+        )
+    except Exception as exc:
+        return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+    if isinstance(written, dict):
+        written["image_ref"] = image_ref
+    return written
+
+
 def chrome_read_page(
     intent: str = "explain",
     max_chars: int = 9000,
@@ -1663,6 +1719,7 @@ class ToolDispatcher:
             "camera_look": lambda **kw: camera_look(ctx, **kw),
             "camera_watch": lambda **kw: camera_watch(ctx, **kw),
             "camera_focus": lambda **kw: camera_focus(ctx, **kw),
+            "vision_note": lambda **kw: vision_note(ctx, **kw),
             "chrome_read_page": lambda **kw: chrome_read_page(**kw),
             "study_mode": lambda **kw: study_mode(ctx, **kw),
             "obs_memory": lambda **kw: obs_memory(ctx, **kw),

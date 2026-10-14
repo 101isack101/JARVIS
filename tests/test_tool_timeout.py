@@ -251,7 +251,7 @@ def test_grok_is_deferred_like_terra():
         await session._handle_tool_call(tool_call)
         immediate = fake_session.responses[0].response
         assert immediate["status"] == "queued"
-        assert immediate["model"] == "grok-4.6"
+        assert immediate["model"] == "grok-4.7"
         await asyncio.gather(*tuple(session._deferred_tasks))
         message = fake_session.client_content[0][0]["parts"][0]["text"]
         assert "analisis de Grok" in message

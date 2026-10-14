@@ -25,10 +25,11 @@ def test_gemini_vision_in_virtual_model_has_pricing():
     assert cost_usd("gemini-3.1-flash-live-preview:vision-in", input_tokens=1_000) > 0
 
 
-def test_reasoner_canonico_es_grok_46():
-    """Isaac migró a Grok 4.6 el 2026-08-19."""
-    assert JARVIS_REASONER_MODEL == "grok-4.6"
+def test_reasoner_canonico_es_grok_47():
+    """Isaac: analisis, agentico y complejo van a Grok 4.7. Gemini queda en la voz."""
+    assert JARVIS_REASONER_MODEL == "grok-4.7"
     assert has_pricing(JARVIS_REASONER_MODEL)
+    assert has_pricing("grok-4.6")
     assert cost_usd(JARVIS_REASONER_MODEL, input_tokens=1_000, output_tokens=200) > 0
 
 
@@ -64,6 +65,7 @@ def test_todos_los_modelos_listados_tienen_pricing_positivo():
 
 
 @pytest.mark.parametrize("model_id", [
+    "grok-4.7",
     "grok-4.6",
     "claude-sonnet-5",
     "claude-sonnet-4-6",

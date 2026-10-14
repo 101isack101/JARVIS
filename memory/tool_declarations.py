@@ -321,6 +321,38 @@ CAMERA_FOCUS_DECL = types.FunctionDeclaration(
     ),
 )
 
+VISION_NOTE_DECL = types.FunctionDeclaration(
+    name="vision_note",
+    description=(
+        "Captura lo que Isaac muestra y, si ya traes el analisis, lo guarda como "
+        "nota en Obsidian. Usala cuando diga 'anota esto', 'haz una nota de lo que "
+        "ves', 'documenta esto', 'analiza y guardalo'. Primera llamada sin analysis: "
+        "solo captura. Segunda llamada con analysis: pide aprobacion y escribe la nota. "
+        "No incluyas claves, tokens ni datos sensibles en analysis."
+    ),
+    parameters=types.Schema(
+        type=types.Type.OBJECT,
+        properties={
+            "analysis": types.Schema(
+                type=types.Type.STRING,
+                description="Analisis de lo visible. Vacio si aun no viste la imagen.",
+            ),
+            "title": types.Schema(
+                type=types.Type.STRING,
+                description="Titulo corto de la nota.",
+            ),
+            "source": types.Schema(
+                type=types.Type.STRING,
+                description="screen si esta en el escritorio, camera si es un objeto fisico.",
+            ),
+            "reason": types.Schema(
+                type=types.Type.STRING,
+                description="Por que se captura.",
+            ),
+        },
+    ),
+)
+
 CHROME_READ_PAGE_DECL = types.FunctionDeclaration(
     name="chrome_read_page",
     description=(
@@ -953,6 +985,7 @@ def all_function_declarations(mode: str | None = None) -> list[types.FunctionDec
         CAMERA_LOOK_DECL,
         CAMERA_WATCH_DECL,
         CAMERA_FOCUS_DECL,
+        VISION_NOTE_DECL,
         CHROME_READ_PAGE_DECL,
         STUDY_MODE_DECL,
         OBS_MEMORY_DECL,

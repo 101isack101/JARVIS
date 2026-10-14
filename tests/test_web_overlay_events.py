@@ -90,3 +90,38 @@ def test_camera_frame_is_kept_in_snapshot_and_cleared_on_stop(overlay):
     assert snap["cameraActive"] is False
     assert snap["cameraFrame"] is None
     assert snap["cameraFocus"] is None
+
+
+def test_snapshot_includes_redacted_error_tail(overlay, tmp_path, monkeypatch):
+    from telemetry.error_journal import record_error
+
+    journal = tmp_path / "errors.jsonl"
+    monkeypatch.setenv("JARVIS_ERROR_JOURNAL_PATH", str(journal))
+    monkeypatch.setenv("JARVIS_ERROR_JOURNAL", "true")
+    record_error("overlay.tail", message="bridge down", context={"token": "sk-live-secret"})
+
+    rows = overlay.snapshot()["errorJournal"]
+
+    assert rows[-1]["source"] == "overlay.tail"
+    assert rows[-1]["message"] == "bridge down"
+    assert "traceback" not in rows[-1]
+    assert "context" not in rows[-1]
+
+
+def test_refresh_emits_error_journal(overlay, tmp_path, monkeypatch):
+    from telemetry.error_journal import record_error
+
+    journal = tmp_path / "errors.jsonl"
+    monkeypatch.setenv("JARVIS_ERROR_JOURNAL_PATH", str(journal))
+    monkeypatch.setenv("JARVIS_ERROR_JOURNAL", "true")
+    record_error("overlay.refresh", message="sse stall")
+
+    emitted: list[tuple] = []
+    overlay.emit = lambda *args: emitted.append(args)
+    overlay.after = lambda *args, **kwargs: None
+
+    overlay._refresh_runtime_panels()
+
+    payloads = [args[1] for args in emitted if args and args[0] == "errorJournal"]
+    assert payloads
+    assert payloads[0][-1]["message"] == "sse stall"

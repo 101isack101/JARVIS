@@ -4,10 +4,10 @@ telemetry/costs.py - Tabla de precios de modelos.
 Precios en USD por 1M tokens. Editable en caliente — cuando xAI/Google
 ajusten precios, actualizo esta tabla sin tocar la logica del tracker.
 
-DECISION DE MODELO (Isaac, 2026-08-19):
-- Reasoner canonico de Jarvis: `grok-4.6` via API xAI.
-- Las entradas viejas de Claude se QUEDAN: la telemetria historica guarda el
-  model_id y sin tarifa el costo pasado se reportaria como 0.
+DECISION DE MODELO (Isaac, 2026-10-14):
+- Voz rapida: Gemini Live.
+- Analisis, trabajo agentico y trabajo complejo: `grok-4.7` via API xAI.
+- `grok-4.6` se queda en la tabla: la telemetria historica guarda el model_id.
 
 Snapshot 2026-08-19. Si la API cambia precios, regenerar comparando con:
 - xAI: https://docs.x.ai/docs/models
@@ -19,10 +19,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 # Fecha del ultimo snapshot manual de precios. Usar para detectar tablas stale.
-PRICING_LAST_UPDATED = "2026-08-19"
+PRICING_LAST_UPDATED = "2026-10-14"
 
-# Modelo canonico de razonamiento profundo en Jarvis. Cambios deliberados solo.
-JARVIS_REASONER_MODEL = "grok-4.6"
+# Modelo canonico de analisis / agentico / complejo. Cambios deliberados solo.
+JARVIS_REASONER_MODEL = "grok-4.7"
 
 
 @dataclass(frozen=True)
@@ -38,7 +38,13 @@ class ModelPricing:
 # Tabla maestra. Key = model_id (string usado en API calls).
 PRICING: dict[str, ModelPricing] = {
     # === Grok (xAI) ===
-    # <200k prompt: $2 input / $0.50 cached / $6 output. cache_write ≈ input.
+    # <200k prompt: $2 input / $0.50 cached / $6 output. Misma tarifa que 4.6.
+    "grok-4.7": ModelPricing(
+        input=2.00,
+        output=6.00,
+        cache_write=2.00,
+        cache_read=0.50,
+    ),
     "grok-4.6": ModelPricing(
         input=2.00,
         output=6.00,

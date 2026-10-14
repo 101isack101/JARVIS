@@ -39,7 +39,7 @@ class OBSCourseAnalyzer:
     def __init__(self, *, transcriber, config, model: str | None = None) -> None:
         self.transcriber = transcriber
         self.config = config
-        self.model = model or os.environ.get("JARVIS_GROK_MODEL", "grok-4.6")
+        self.model = model or os.environ.get("JARVIS_GROK_MODEL", "grok-4.7")
         from grok.reasoner import resolve_xai_api_key
 
         api_key = resolve_xai_api_key()

@@ -48,12 +48,12 @@ DEFERRED_TOOL_ACK: dict[str, dict[str, str]] = {
     },
     "ask_grok_deep": {
         "provider": "xai",
-        "model": "grok-4.6",
+        "model": "grok-4.7",
         "worker": "Grok",
     },
     "ask_claude_deep": {
         "provider": "xai",
-        "model": "grok-4.6",
+        "model": "grok-4.7",
         "worker": "Grok",
     },
 }
