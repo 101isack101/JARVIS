@@ -17,6 +17,9 @@ from dataclasses import dataclass, field
 from typing import Callable
 
 from .costs import cost_usd
+from .logger import get_logger
+
+log = get_logger(__name__)
 
 
 @dataclass
@@ -100,7 +103,7 @@ class TokenTracker:
                 try:
                     cb(snap)
                 except Exception as exc:
-                    print(f"[tracker] listener fallo: {exc}")
+                    log.warning(f"[tracker] listener fallo: {exc}")
         return delta_cost
 
     def snapshot(self) -> Snapshot:

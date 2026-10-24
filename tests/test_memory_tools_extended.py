@@ -49,6 +49,32 @@ class FakeObsidianMCP:
         return {"ok": True, "tool": name, "arguments": arguments}
 
 
+def test_jarvis_set_mode_logs_when_callback_fails(tmp_path, monkeypatch):
+    vault = ObsidianVault(tmp_path, read_all=True)
+    rag = VaultRAG(vault=vault, index_dir=tmp_path / "rag")
+    recorded = []
+
+    def capture(source, **kwargs):
+        recorded.append((source, kwargs))
+
+    def boom(_mode):
+        raise RuntimeError("overlay down")
+
+    monkeypatch.setattr("memory.tools.record_error", capture)
+    ctx = ToolContext(
+        vault=vault,
+        rag=rag,
+        modes=ModeManager(),
+        on_mode_changed=boom,
+    )
+    result = ToolDispatcher(ctx).call("jarvis_set_mode", {"mode": "debugging"})
+
+    assert result["changed"] is True
+    assert recorded
+    assert recorded[0][0] == "jarvis_set_mode.on_mode_changed"
+    assert recorded[0][1]["exc"].args == ("overlay down",)
+
+
 def test_dispatcher_exposes_claude_and_modes(tmp_path):
     vault = ObsidianVault(tmp_path, read_all=True)
     rag = VaultRAG(vault=vault, index_dir=tmp_path / "rag")
@@ -202,6 +228,34 @@ def test_english_practice_toggle_changes_runtime_mode(tmp_path):
     assert stopped["ok"] is True
     assert stopped["active"] is False
     assert modes.get_mode()["mode"] == "general"
+
+
+def test_study_mode_logs_when_set_mode_fails(tmp_path, monkeypatch):
+    vault = ObsidianVault(tmp_path, read_all=True)
+    rag = VaultRAG(vault=vault, index_dir=tmp_path / "rag")
+
+    class BoomModes:
+        def set_mode(self, mode):
+            raise RuntimeError("mode store down")
+
+    recorded = []
+
+    def capture(source, **kwargs):
+        recorded.append((source, kwargs))
+
+    monkeypatch.setattr("memory.tools.record_error", capture)
+    ctx = ToolContext(
+        vault=vault,
+        rag=rag,
+        modes=BoomModes(),
+        approvals=AutoApprovalBroker(approve=True),
+    )
+    result = ToolDispatcher(ctx).call("study_mode", {"action": "start", "title": "Log Test"})
+
+    assert result["ok"] is True
+    assert recorded
+    assert recorded[0][0] == "study_mode.set_mode"
+    assert recorded[0][1]["exc"].args == ("mode store down",)
 
 
 def test_study_mode_start_requires_hitl(tmp_path):

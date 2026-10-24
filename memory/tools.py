@@ -800,8 +800,13 @@ def study_mode(
         if ctx.modes is not None:
             try:
                 ctx.modes.set_mode("study")
-            except Exception:
-                pass
+            except Exception as exc:
+                record_error(
+                    "study_mode.set_mode",
+                    exc=exc,
+                    severity="warning",
+                    message="Study Mode arranco, pero no pude cambiar el modo de trabajo a study",
+                )
         return controller.start(
             title=title,
             note_path=note_path,
@@ -1305,8 +1310,13 @@ def jarvis_set_mode(ctx: ToolContext, mode: str) -> dict:
     if result.get("changed") and ctx.on_mode_changed is not None:
         try:
             ctx.on_mode_changed(str(result.get("mode") or mode))
-        except Exception:
-            pass
+        except Exception as exc:
+            record_error(
+                "jarvis_set_mode.on_mode_changed",
+                exc=exc,
+                severity="warning",
+                message="el modo cambio, pero el aviso a la UI fallo",
+            )
     return result
 
 
