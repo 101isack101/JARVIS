@@ -4,6 +4,14 @@ Todas las versiones relevantes de JARVIS se documentan aqui.
 
 ## Unreleased
 
+## 1.12 - 2026-10-23
+
+### Fixed
+
+- Study Mode ya no traga el fallo al cambiar el modo de trabajo: queda en el error journal y la sesión sigue.
+- El aviso de cambio de modo a la UI, si falla, queda en el journal. El modo sí cambia.
+- Un listener del tracker que falla se registra con el logger, no con `print`.
+
 ## 1.11 - 2026-10-14
 
 ### Changed
