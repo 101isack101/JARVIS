@@ -11,6 +11,7 @@ from typing import Callable
 
 from actions.chrome_reader import ChromeReader
 from security.secret_filter import redact_secrets
+from telemetry.error_journal import record_error
 
 from .ledger import Evidence, StudyLedger
 from .obsidian_writer import StudyObsidianWriter
@@ -352,8 +353,18 @@ class StudyModeController:
             if self.on_flush_done is not None:
                 try:
                     self.on_flush_done(dict(result))
-                except Exception:
-                    pass
+                except Exception as exc:
+                    record_error(
+                        "study.flush_done",
+                        exc=exc,
+                        severity="warning",
+                        message="Fallo el callback on_flush_done de Study Mode; el resultado del flush se conserva.",
+                        context={
+                            "ok": result.get("ok"),
+                            "flushed": result.get("flushed"),
+                            "evidence_count": result.get("evidence_count"),
+                        },
+                    )
 
         self._flush_thread = threading.Thread(
             target=_worker,
@@ -371,6 +382,7 @@ class StudyModeController:
         }
 
     def _observer_loop(self) -> None:
+        failing = False
         while not self._stop_event.wait(self.config.capture_interval_s):
             with self._lock:
                 active = self._ledger is not None
@@ -381,5 +393,20 @@ class StudyModeController:
                 continue
             try:
                 self.capture_page(intent="continuous_observer")
-            except Exception:
-                pass
+                failing = False
+            except Exception as exc:
+                if not failing:
+                    failing = True
+                    record_error(
+                        "study.observer",
+                        exc=exc,
+                        severity="warning",
+                        message=(
+                            "Fallo capture_page en el observer de Study Mode; primer fallo de una racha, "
+                            "los siguientes se omiten hasta una captura sin excepcion."
+                        ),
+                        context={
+                            "intent": "continuous_observer",
+                            "capture_interval_s": self.config.capture_interval_s,
+                        },
+                    )

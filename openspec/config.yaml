@@ -1,0 +1,32 @@
+schema: spec-driven
+
+context: |
+  Idioma: Español. Todos los artefactos deben escribirse en español.
+  Mantén los encabezados estructurales de OpenSpec y las palabras SHALL/MUST en inglés.
+  Proyecto: JARVIS, asistente de voz en tiempo real para Windows.
+  Stack: Python 3.11 (backend jarvis.py, bridge HTTP 127.0.0.1:8765), shell de escritorio Tauri (desktop/src-tauri, Rust), UI React (ui/).
+  Tests: pytest en tests/, ejecutar con H:\Python311\python.exe -m pytest (el venv de Hermes no tiene faiss).
+  Convenciones: cambios pequeños, commits en ramas hermes/<tema>, nunca push forzado, nunca exponer secretos de .env.
+  Release: VERSION, CHANGELOG.md, desktop/src-tauri/Cargo.toml, desktop/src-tauri/tauri.conf.json, ui/package.json.
+
+# Per-artifact rules (optional)
+# Add custom rules for specific artifacts.
+# Example:
+#   rules:
+#     proposal:
+#       - Keep proposals under 500 words
+#       - Always state what is out of scope
+#     tasks:
+#       - Break tasks into chunks of max 2 hours
+
+# Per-operation guidance (optional)
+# Add advisory guidance for how apply and archive work should be conducted.
+# This is separate from artifact rules above.
+# Example:
+#   operations:
+#     apply:
+#       guidance:
+#         - Keep test summaries concise
+#     archive:
+#       guidance:
+#         - Summarize the archive outcome before finishing

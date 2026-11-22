@@ -1,4 +1,8 @@
+import json
 from datetime import date
+from types import SimpleNamespace
+
+import pytest
 
 from memory.obsidian_vault import ObsidianVault
 from memory import notes as notes_mod
@@ -102,3 +106,98 @@ def test_dismiss_last_marks_cooldown(tmp_path):
     eng2 = ProactivityEngine(config=cfg, state_path=path)
     eng2.observe(vault, FakeRAG(), "Polymath IDE")
     assert eng2.next_opportunity() is None
+
+
+# --- Error journal: los fallos fail-safe deben dejar rastro ---------------
+
+
+def _journal(tmp_path, monkeypatch):
+    path = tmp_path / "errors.jsonl"
+    monkeypatch.setenv("JARVIS_ERROR_JOURNAL_PATH", str(path))
+    monkeypatch.setenv("JARVIS_ERROR_JOURNAL", "true")
+    return path
+
+
+def _rows(path):
+    if not path.exists():
+        return []
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+
+
+def _boom(*_args, **_kwargs):
+    raise RuntimeError("boom")
+
+
+def _engine(tmp_path):
+    return ProactivityEngine(
+        config=ProactivityConfig(min_score=0.0), state_path=tmp_path / "state.json"
+    )
+
+
+def test_build_briefing_failure_is_journaled(tmp_path, monkeypatch):
+    journal = _journal(tmp_path, monkeypatch)
+    eng = _engine(tmp_path)
+    monkeypatch.setattr("proactivity.engine.build_project_states", _boom)
+
+    assert eng.build_briefing(object(), today=date(2026, 5, 30)) == ""
+
+    rows = _rows(journal)
+    assert len(rows) == 1
+    assert rows[0]["source"] == "proactivity.build_briefing"
+    assert rows[0]["severity"] == "warning"
+    assert rows[0]["error_type"] == "RuntimeError"
+
+
+def test_observe_failure_is_journaled(tmp_path, monkeypatch):
+    journal = _journal(tmp_path, monkeypatch)
+    eng = _engine(tmp_path)
+    monkeypatch.setattr("proactivity.engine.build_project_states", _boom)
+
+    assert eng.observe(object(), FakeRAG(), "hola jarvis") is None
+
+    rows = _rows(journal)
+    assert len(rows) == 1
+    assert rows[0]["source"] == "proactivity.observe"
+    assert rows[0]["severity"] == "warning"
+    assert rows[0]["error_type"] == "RuntimeError"
+    assert rows[0]["context"] == {"turn_chars": len("hola jarvis")}
+
+
+@pytest.mark.parametrize("failing", ["top_opportunity", "mark_offered"])
+def test_next_opportunity_failure_is_journaled(tmp_path, monkeypatch, failing):
+    journal = _journal(tmp_path, monkeypatch)
+    eng = _engine(tmp_path)
+    opp = SimpleNamespace(id="opp-1", suggestion_struct={"project": "X"})
+
+    monkeypatch.setattr(
+        eng.queue, "top_opportunity", _boom if failing == "top_opportunity" else (lambda: opp)
+    )
+    monkeypatch.setattr(
+        eng.queue, "mark_offered", _boom if failing == "mark_offered" else (lambda _id: None)
+    )
+
+    assert eng.next_opportunity() is None
+    assert eng._last_offered_id is None
+
+    rows = _rows(journal)
+    assert len(rows) == 1
+    assert rows[0]["source"] == "proactivity.next_opportunity"
+    assert rows[0]["severity"] == "warning"
+    assert rows[0]["error_type"] == "RuntimeError"
+
+
+def test_dismiss_last_failure_is_journaled(tmp_path, monkeypatch):
+    journal = _journal(tmp_path, monkeypatch)
+    eng = _engine(tmp_path)
+    eng._last_offered_id = "opp-1"
+    monkeypatch.setattr(eng.queue, "mark_dismissed", _boom)
+
+    assert eng.dismiss_last() is None
+    assert eng._last_offered_id is None
+
+    rows = _rows(journal)
+    assert len(rows) == 1
+    assert rows[0]["source"] == "proactivity.dismiss_last"
+    assert rows[0]["severity"] == "warning"
+    assert rows[0]["error_type"] == "RuntimeError"
+    assert rows[0]["context"] == {"opportunity_id": "opp-1"}

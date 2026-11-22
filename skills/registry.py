@@ -12,6 +12,8 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
+from telemetry.error_journal import record_error
+
 
 @dataclass(frozen=True)
 class SkillDefinition:
@@ -258,8 +260,21 @@ class SkillRegistry:
                 skill = SkillDefinition.from_dict(raw)
                 if skill.name:
                     skills[skill.name] = skill
-            except Exception:
-                continue
+                else:
+                    record_error(
+                        "skills.registry.load",
+                        severity="warning",
+                        message=f"skill sin nombre, omitida: {path.name}",
+                        context={"file": path.name},
+                    )
+            except Exception as exc:
+                record_error(
+                    "skills.registry.load",
+                    exc=exc,
+                    severity="warning",
+                    message=f"skill JSON omitida: {path.name}",
+                    context={"file": path.name},
+                )
         self._skills = skills
         if self._active and self._active not in self._skills:
             self._active = None
